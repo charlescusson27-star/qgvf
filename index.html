@@ -24,19 +24,16 @@
 </head>
 <body id="body-theme" class="bg-stone-950 text-amber-50 h-full flex flex-col font-sans bg-cover bg-center bg-fixed relative overflow-hidden">
 
-    <div id="video-bg-container" class="hidden fixed inset-0 z-0 pointer-events-none"></div>
-    <audio id="bg-audio" loop class="hidden"></audio>
-
     <div id="app" class="h-full flex flex-col flex-1 backdrop-blur-sm bg-black/60 z-10 relative overflow-hidden">
         <div class="flex-1 flex items-center justify-center p-4 text-center">
             <div class="space-y-3">
                 <div class="w-10 h-10 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                <p class="text-amber-200 text-sm font-medium">Chargement de LE QG...</p>
+                <p class="text-amber-200 text-sm font-medium">Connexion au Cloud Firebase...</p>
             </div>
         </div>
     </div>
 
-    <!-- Modal Visionneuse de fichiers -->
+    <!-- Modal Visionneuse -->
     <div id="file-viewer-modal" class="hidden fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4">
         <div class="w-full max-w-5xl h-[85vh] dyn-card border rounded-3xl p-6 shadow-2xl flex flex-col space-y-4">
             <div class="flex justify-between items-center border-b border-amber-900/40 pb-3">
@@ -75,33 +72,44 @@
         try {
             firebase.initializeApp(firebaseConfig);
             db = firebase.firestore();
-        } catch(e) {}
+        } catch(e) {
+            console.error("Erreur d'initialisation Firebase :", e);
+        }
 
         const ADMIN_EMAIL = "charlescusson27@gmail.com";
 
+        // Moteur de stockage 100% Cloud Firebase (sans localStorage pour les données partagées)
+        let cloudData = {
+            users: [],
+            messages: [],
+            ideas_board: [],
+            countdowns: [{ id: 1, title: 'Épreuves du Bac Pro', date: '2026-06-15T08:00' }],
+            quizzes: [],
+            quiz_submissions: {},
+            custom_pages: [],
+            hidden_pages: [],
+            admin_calendar: [],
+            appreciations: {},
+            revision_sheets: [],
+            exam_subjects: [],
+            site_colors: { btnColor: '#d97706', cardBg: 'rgba(10, 10, 10, 0.9)', borderColor: 'rgba(245, 158, 11, 0.4)' },
+            home_qr_image: ''
+        };
+
         const DB = {
-            get(k, fb) {
-                let item = localStorage.getItem('leqg_' + k);
-                if (item) { try { return JSON.parse(item); } catch(e){} }
-                return fb;
+            get(k) {
+                return cloudData[k] !== undefined ? cloudData[k] : null;
             },
-            set(k, val) {
-                localStorage.setItem('leqg_' + k, JSON.stringify(val));
-                if (db) { 
-                    db.collection("leqg_data").doc(k).set({ value: val }).catch((err) => { console.warn("Erreur sauvegarde Firebase :", err); }); 
-                }
-            },
-            async syncFromRemote() {
-                if (!db) return;
-                const keys = ['users', 'messages', 'ideas_board', 'countdowns', 'quizzes', 'quiz_submissions', 'custom_pages', 'hidden_pages', 'admin_calendar', 'appreciations', 'revision_sheets', 'exam_subjects', 'site_colors', 'home_qr_image'];
-                for (let k of keys) {
+            async set(k, val) {
+                cloudData[k] = val;
+                if (db) {
                     try {
-                        let doc = await db.collection("leqg_data").doc(k).get();
-                        if (doc.exists) { 
-                            localStorage.setItem('leqg_' + k, JSON.stringify(doc.data().value)); 
-                        }
-                    } catch(e){}
+                        await db.collection("leqg_data").doc(k).set({ value: val });
+                    } catch(err) {
+                        console.error("Erreur d'écriture Firebase sur " + k, err);
+                    }
                 }
+                render();
             }
         };
 
@@ -114,55 +122,69 @@
             activeQuizId: null
         };
 
-        let countdownInterval = null;
+        async function init() {
+            if (db) {
+                try {
+                    const keys = Object.keys(cloudData);
+                    for (let k of keys) {
+                        let doc = await db.collection("leqg_data").doc(k).get();
+                        if (doc.exists) {
+                            cloudData[k] = doc.data().value;
+                        } else {
+                            // Initialisation initiale dans Firebase si vide
+                            await db.collection("leqg_data").doc(k).set({ value: cloudData[k] });
+                        }
+                    }
 
-        function init() {
-            if (!DB.get('users', null)) {
-                DB.set('users', [
-                    { username: 'admin', lastName: 'Délégué Principal', password: 'admin20', role: 'admin', status: 'active', mustChangePass: true, birthday: '2009-03-26', email: ADMIN_EMAIL, permissions: {} },
-                    { username: 'delegue1', lastName: 'Adjoint 1', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { users: true, quizzes: true } },
-                    { username: 'delegue2', lastName: 'Adjoint 2', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { ideas: true, calendar: true } },
-                    { username: 'delegue3', lastName: 'Adjoint 3', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { pages: true, revisions: true } }
-                ]);
+                    // Création du compte admin par défaut si la base utilisateurs est vide
+                    let users = cloudData.users || [];
+                    if (users.length === 0) {
+                        cloudData.users = [
+                            { username: 'admin', lastName: 'Délégué Principal', password: 'admin20', role: 'admin', status: 'active', mustChangePass: true, birthday: '2009-03-26', email: ADMIN_EMAIL, permissions: {} },
+                            { username: 'delegue1', lastName: 'Adjoint 1', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { users: true, quizzes: true } },
+                            { username: 'delegue2', lastName: 'Adjoint 2', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { ideas: true, calendar: true } },
+                            { username: 'delegue3', lastName: 'Adjoint 3', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { pages: true, revisions: true } }
+                        ];
+                        await db.collection("leqg_data").doc("users").set({ value: cloudData.users });
+                    }
+                } catch(e) {
+                    console.error("Erreur de chargement Firebase :", e);
+                }
             }
-            if (!DB.get('messages', null)) DB.set('messages', [{ id: 1, type: 'general', sender: 'admin', text: 'Bienvenue sur LE QG !', time: 'Aujourd\'hui' }]);
-            if (!DB.get('appreciations', null)) DB.set('appreciations', {});
-            if (!DB.get('custom_pages', null)) DB.set('custom_pages', []);
-            if (!DB.get('hidden_pages', null)) DB.set('hidden_pages', []);
-            if (!DB.get('admin_calendar', null)) DB.set('admin_calendar', []);
-            if (!DB.get('quizzes', null)) DB.set('quizzes', []);
-            if (!DB.get('quiz_submissions', null)) DB.set('quiz_submissions', {});
-            if (!DB.get('ideas_board', null)) DB.set('ideas_board', []);
-            if (!DB.get('revision_sheets', null)) DB.set('revision_sheets', []);
-            if (!DB.get('exam_subjects', null)) DB.set('exam_subjects', []);
-            if (!DB.get('countdowns', null)) DB.set('countdowns', [{ id: 1, title: 'Épreuves du Bac Pro', date: '2026-06-15T08:00' }]);
 
             render();
 
-            DB.syncFromRemote().then(() => { render(); });
-
-            // Synchronisation périodique vers Firebase toutes les 30 secondes
-            setInterval(() => {
-                const keys = ['users', 'messages', 'ideas_board', 'countdowns', 'quizzes', 'quiz_submissions', 'custom_pages', 'hidden_pages', 'admin_calendar', 'appreciations', 'revision_sheets', 'exam_subjects', 'site_colors', 'home_qr_image'];
+            // Actualisation automatique en temps réel depuis le cloud toutes les 15 secondes
+            setInterval(async () => {
                 if (db) {
-                    for (let k of keys) {
-                        let val = DB.get(k, null);
-                        if (val !== null) { 
-                            db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); 
+                    try {
+                        const keys = Object.keys(cloudData);
+                        for (let k of keys) {
+                            let doc = await db.collection("leqg_data").doc(k).get();
+                            if (doc.exists) {
+                                cloudData[k] = doc.data().value;
+                            }
                         }
-                    }
+                    } catch(e){}
                 }
-            }, 30000);
+            }, 15000);
         }
 
-        function getCurrentUser() { return JSON.parse(localStorage.getItem('leqg_current_user') || 'null'); }
+        function getCurrentUser() { 
+            let u = sessionStorage.getItem('leqg_current_user');
+            return u ? JSON.parse(u) : null; 
+        }
+
         function showToast(title, msg) {
             document.getElementById('toast-title').textContent = title;
             document.getElementById('toast-msg').textContent = msg;
             document.getElementById('global-notification-toast').classList.remove('hidden');
             setTimeout(() => document.getElementById('global-notification-toast').classList.add('hidden'), 5000);
         }
-        function toggleModal(id, show) { document.getElementById(id).classList.toggle('hidden', !show); }
+
+        function toggleModal(id, show) { 
+            document.getElementById(id).classList.toggle('hidden', !show); 
+        }
 
         function openFileViewer(title, url, type) {
             document.getElementById('viewer-title').textContent = title;
@@ -174,7 +196,6 @@
         }
 
         function render() {
-            if (countdownInterval) clearInterval(countdownInterval);
             let app = document.getElementById('app'), user = getCurrentUser();
             if (!user) return app.innerHTML = renderLogin();
             if (user.status === 'masked') return app.innerHTML = `<div class="flex-1 flex flex-col items-center justify-center p-6 text-center"><h1 class="text-xl font-bold text-red-400">Compte Suspendu</h1><button onclick="logout()" class="mt-4 px-4 py-2 dyn-btn text-white rounded-xl text-xs">Déconnexion</button></div>`;
@@ -187,8 +208,8 @@
                 <div class="p-3 bg-amber-500/10 text-amber-400 rounded-2xl text-3xl inline-block"><i class="fa-solid fa-chess-rook"></i></div>
                 <h1 class="text-2xl font-black text-white">LE QG</h1>
                 <form onsubmit="handleLogin(event)" class="space-y-3 text-left">
-                    <input type="text" id="l-user" required placeholder="Identifiant (admin)" class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
-                    <input type="password" id="l-pass" required placeholder="Mot de passe (admin20)" class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
+                    <input type="text" id="l-user" required placeholder="Identifiant..." class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
+                    <input type="password" id="l-pass" required placeholder="Mot de passe..." class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
                     <button type="submit" class="w-full py-3 dyn-btn text-xs text-white font-bold rounded-2xl">Se connecter</button>
                 </form></div></div>`;
         }
@@ -206,7 +227,7 @@
         }
 
         function renderDashboard(user) {
-            let hidden = DB.get('hidden_pages', []), custom = DB.get('custom_pages', []);
+            let hidden = DB.get('hidden_pages') || [], custom = DB.get('custom_pages') || [];
             let navs = custom.filter(p => !hidden.includes('page_' + p.id)).map(p => sbBtn('page_' + p.id, p.title, p.icon || 'file-lines')).join('');
             let canAccessAdmin = user.role === 'admin' || user.role === 'delegate';
 
@@ -243,7 +264,7 @@
 
         function renderContent(user) {
             if (state.tab.startsWith('page_')) {
-                let cp = DB.get('custom_pages', []).find(x => x.id == state.tab.replace('page_', ''));
+                let cp = (DB.get('custom_pages') || []).find(x => x.id == state.tab.replace('page_', ''));
                 return cp ? `<div class="max-w-3xl mx-auto dyn-card border p-6 rounded-3xl space-y-4"><h2 class="text-2xl font-black text-amber-400">${cp.title}</h2>${cp.elements.map(e => e.type === 'text' ? `<p class="text-xs text-amber-100 whitespace-pre-wrap">${e.content}</p>` : `<button onclick="openFileViewer('${e.title}', '${e.fileData}', '${e.fileType}')" class="px-4 py-2 dyn-btn text-white rounded-xl text-xs font-bold">${e.title}</button>`).join('')}</div>` : '';
             }
             if (state.tab === 'home') return renderHome();
@@ -251,8 +272,8 @@
             if (state.tab === 'chat') return renderChat(user);
             if (state.tab === 'calendar') return `<div class="max-w-3xl mx-auto dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">Agenda</h2></div>`;
             if (state.tab === 'quizzes') return renderQuizzesTab(user);
-            if (state.tab === 'revisions') return renderDocPage('Fiches de Révision', DB.get('revision_sheets', []));
-            if (state.tab === 'exams') return renderDocPage('Sujets Bac & Exercices', DB.get('exam_subjects', []));
+            if (state.tab === 'revisions') return renderDocPage('Fiches de Révision', DB.get('revision_sheets') || []);
+            if (state.tab === 'exams') return renderDocPage('Sujets Bac & Exercices', DB.get('exam_subjects') || []);
             if (state.tab === 'ideas') return renderIdeasPage(user);
             if (state.tab === 'notes') return renderNotesPage(user);
             if (state.tab === 'admin' && (user.role === 'admin' || user.role === 'delegate')) return renderAdmin(user);
@@ -260,7 +281,7 @@
         }
 
         function renderHome() {
-            let qr = DB.get('home_qr_image', '');
+            let qr = DB.get('home_qr_image') || '';
             return `<div class="max-w-3xl mx-auto space-y-6 text-center">
                 <div class="dyn-card border p-8 space-y-3 rounded-3xl"><h2 class="text-2xl font-black text-white">Bienvenue sur LE QG</h2><p class="text-xs text-amber-200/75">Ton espace collaboratif de lycée.</p></div>
                 <div class="dyn-card border p-6 rounded-3xl space-y-3">
@@ -271,7 +292,7 @@
         }
 
         function renderUserAppreciations(user) {
-            let all = DB.get('appreciations', {}), myApp = all[user.username] || { t1: '', t2: '', t3: '', published: false };
+            let all = DB.get('appreciations') || {}, myApp = all[user.username] || { t1: '', t2: '', t3: '', published: false };
             if (!myApp.published) return `<div class="max-w-2xl mx-auto dyn-card border p-8 text-center rounded-3xl"><i class="fa-solid fa-lock text-4xl text-amber-400"></i><h2 class="text-xl font-bold text-white">Appréciations</h2><p class="text-xs text-amber-200/70 mt-2">Non publiées par le délégué pour le moment.</p></div>`;
             return `<div class="max-w-3xl mx-auto space-y-4 text-xs">
                 <div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">Mes Appréciations</h2></div>
@@ -283,7 +304,7 @@
         }
 
         function renderQuizzesTab(user) {
-            let quizzes = DB.get('quizzes', []), subs = DB.get('quiz_submissions', {}), mySubs = subs[user.username] || [];
+            let quizzes = DB.get('quizzes') || [], subs = DB.get('quiz_submissions') || {}, mySubs = subs[user.username] || [];
             if (state.activeQuizId) {
                 let q = quizzes.find(x => x.id === state.activeQuizId);
                 return q ? renderActiveQuiz(q) : '';
@@ -306,17 +327,18 @@
                 </form></div>`;
         }
 
-        function submitQuiz(e, quizId) {
+        async function submitQuiz(e, quizId) {
             e.preventDefault();
-            let quiz = DB.get('quizzes', []).find(x => x.id === quizId), score = 0;
+            let quizzes = DB.get('quizzes') || [];
+            let quiz = quizzes.find(x => x.id === quizId), score = 0;
             quiz.questions.forEach((q, idx) => {
                 let sel = document.querySelector(`input[name="q_${idx}"]:checked`);
                 if (sel && parseInt(sel.value) === parseInt(q.correct)) score++;
             });
-            let user = getCurrentUser(), subs = DB.get('quiz_submissions', {});
+            let user = getCurrentUser(), subs = DB.get('quiz_submissions') || {};
             if (!subs[user.username]) subs[user.username] = [];
             subs[user.username].push({ quizId, quizTitle: quiz.title, score, total: quiz.questions.length, date: new Date().toLocaleDateString() });
-            DB.set('quiz_submissions', subs);
+            await DB.set('quiz_submissions', subs);
             showToast("Quiz validé !", `Tu as obtenu ${score} / ${quiz.questions.length}`);
             state.activeQuizId = null; render();
         }
@@ -340,22 +362,22 @@
         }
 
         function renderIdeasPage() {
-            let ideas = DB.get('ideas_board', []);
+            let ideas = DB.get('ideas_board') || [];
             return `<div class="max-w-2xl mx-auto space-y-4 text-xs">
                 <div class="dyn-card border p-6 rounded-3xl space-y-3"><h2 class="text-xl font-black text-amber-400">Boîte à Idées</h2>
                 <form onsubmit="submitIdea(event)" class="space-y-2"><input type="text" id="i-title" required placeholder="Titre..." class="w-full p-2.5 bg-stone-900 border rounded-xl"><textarea id="i-desc" required placeholder="Description..." class="w-full p-2.5 bg-stone-900 border rounded-xl h-16 resize-none"></textarea><button type="submit" class="w-full py-2 dyn-btn text-white rounded-xl font-bold">Proposer</button></form></div>
                 <div class="space-y-2">${ideas.map((i, idx)=>`<div class="dyn-card border p-4 rounded-2xl space-y-2"><h4 class="font-bold text-amber-200">${i.title} (${i.author})</h4><p class="text-amber-100">${i.desc}</p><div class="flex gap-2"><button onclick="voteIdea(${idx}, 'up')" class="px-2 py-1 bg-emerald-600/20 text-emerald-300 rounded-lg">Pour (${i.votesUp||0})</button><button onclick="voteIdea(${idx}, 'down')" class="px-2 py-1 bg-red-600/20 text-red-300 rounded-lg">Contre (${i.votesDown||0})</button></div></div>`).join('')}</div></div>`;
         }
-        function submitIdea(e) {
+        async function submitIdea(e) {
             e.preventDefault();
-            let ideas = DB.get('ideas_board', []);
+            let ideas = DB.get('ideas_board') || [];
             ideas.push({ title: document.getElementById('i-title').value, desc: document.getElementById('i-desc').value, author: getCurrentUser().username, votesUp: 0, votesDown: 0 });
-            DB.set('ideas_board', ideas); render();
+            await DB.set('ideas_board', ideas);
         }
-        function voteIdea(idx, type) {
-            let ideas = DB.get('ideas_board', []);
+        async function voteIdea(idx, type) {
+            let ideas = DB.get('ideas_board') || [];
             ideas[idx][type === 'up' ? 'votesUp' : 'votesDown']++;
-            DB.set('ideas_board', ideas); render();
+            await DB.set('ideas_board', ideas);
         }
 
         function renderNotesPage(user) {
@@ -363,18 +385,18 @@
         }
 
         function renderChat(user) {
-            let users = DB.get('users', []), msgs = DB.get('messages', []);
+            let users = DB.get('users') || [], msgs = DB.get('messages') || [];
             let active = state.chatMode === 'general' ? msgs.filter(m => m.type === 'general') : msgs.filter(m => m.type === 'private' && (m.sender === user.username && m.recipient === state.targetUser || m.sender === state.targetUser && m.recipient === user.username));
             return `<div class="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-4 h-[500px] text-xs">
                 <div class="dyn-card border p-3 flex flex-col space-y-2 rounded-3xl"><button onclick="state.chatMode='general';render()" class="p-2 rounded-xl bg-stone-900 font-bold text-amber-200">Général</button><div class="flex-1 overflow-y-auto space-y-1">${users.filter(u=>u.username!==user.username).map(u=>`<button onclick="state.chatMode='private';state.targetUser='${u.username}';render()" class="w-full text-left p-2 rounded-xl bg-stone-900 text-amber-200">${u.username}</button>`).join('')}</div></div>
                 <div class="md:col-span-3 dyn-card border p-4 flex flex-col justify-between rounded-3xl"><div class="flex-1 overflow-y-auto space-y-2 bg-stone-900/40 p-3 rounded-2xl">${active.map(m=>`<div class="p-2.5 bg-stone-950 rounded-xl space-y-1"><span class="font-bold text-amber-400">${m.sender}:</span> <p class="text-amber-100">${m.text}</p></div>`).join('')}</div>
                 <form onsubmit="sendChat(event)" class="flex gap-2 pt-2"><input type="text" id="c-inp" required placeholder="Message..." class="flex-1 p-2.5 bg-stone-900 border rounded-xl text-amber-100"><button type="submit" class="dyn-btn px-4 text-white rounded-xl font-bold">Envoyer</button></form></div></div>`;
         }
-        function sendChat(e) {
+        async function sendChat(e) {
             e.preventDefault();
-            let msgs = DB.get('messages', []);
+            let msgs = DB.get('messages') || [];
             msgs.push({ type: state.chatMode, sender: getCurrentUser().username, recipient: state.targetUser, text: document.getElementById('c-inp').value, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) });
-            DB.set('messages', msgs); render();
+            await DB.set('messages', msgs);
         }
 
         function renderAdmin(user) {
@@ -402,7 +424,7 @@
         }
 
         function renderAdminUsers() {
-            let users = DB.get('users', []);
+            let users = DB.get('users') || [];
             let students = users.filter(u => u.role === 'student');
             let delegates = users.filter(u => u.role === 'delegate');
 
@@ -465,41 +487,43 @@
             </div>`;
         }
 
-        function createNewUser(e) {
+        async function createNewUser(e) {
             e.preventDefault();
             let username = document.getElementById('new-user').value.trim();
             let password = document.getElementById('new-pass').value.trim();
             let role = document.getElementById('new-role').value;
-            let users = DB.get('users', []);
+            let users = DB.get('users') || [];
             if (users.some(u => u.username === username)) { alert("Cet identifiant existe déjà !"); return; }
             users.push({ username, lastName: '', password, role, status: 'active', mustChangePass: true, birthday: '2009-01-01', email: '', permissions: {} });
-            DB.set('users', users); showToast("Succès", "Compte créé !"); render();
+            await DB.set('users', users);
+            showToast("Succès", "Compte créé sur le Cloud Firebase !");
         }
 
-        function resetPassword(username) {
+        async function resetPassword(username) {
             let newPass = prompt("Nouveau mot de passe pour " + username + " :");
             if (!newPass) return;
-            let users = DB.get('users', []), idx = users.findIndex(u => u.username === username);
-            if (idx !== -1) { users[idx].password = newPass; DB.set('users', users); showToast("Succès", "Mot de passe mis à jour !"); render(); }
+            let users = DB.get('users') || [], idx = users.findIndex(u => u.username === username);
+            if (idx !== -1) { users[idx].password = newPass; await DB.set('users', users); showToast("Succès", "Mot de passe mis à jour !"); }
         }
 
-        function toggleDelegatePerm(username, permKey) {
-            let users = DB.get('users', []), idx = users.findIndex(u => u.username === username);
+        async function toggleDelegatePerm(username, permKey) {
+            let users = DB.get('users') || [], idx = users.findIndex(u => u.username === username);
             if (idx !== -1) {
                 if (!users[idx].permissions) users[idx].permissions = {};
                 users[idx].permissions[permKey] = !users[idx].permissions[permKey];
-                DB.set('users', users); showToast("Permissions", "Modifications enregistrées !");
+                await DB.set('users', users);
+                showToast("Permissions", "Modifications enregistrées !");
             }
         }
 
         function exportAllCSV() {
             let csv = "Identifiant;Nom;Email;Role;MotDePasse\n";
-            DB.get('users', []).forEach(u => csv += `${u.username};${u.lastName||''};${u.email||''};${u.role};${u.password}\n`);
+            (DB.get('users') || []).forEach(u => csv += `${u.username};${u.lastName||''};${u.email||''};${u.role};${u.password}\n`);
             downloadCSV("tous_les_comptes.csv", csv);
         }
 
         function exportSingleCSV(username) {
-            let u = DB.get('users', []).find(x => x.username === username);
+            let u = (DB.get('users') || []).find(x => x.username === username);
             if(u) downloadCSV(`compte_${username}.csv`, `Identifiant;Nom;Email;Role;MotDePasse\n${u.username};${u.lastName||''};${u.email||''};${u.role};${u.password}\n`);
         }
 
@@ -508,24 +532,25 @@
             a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
         }
 
-        function toggleMask(username) {
-            let users = DB.get('users', []), idx = users.findIndex(u => u.username === username);
-            if(idx !== -1) { users[idx].status = users[idx].status === 'masked' ? 'active' : 'masked'; DB.set('users', users); render(); }
+        async function toggleMask(username) {
+            let users = DB.get('users') || [], idx = users.findIndex(u => u.username === username);
+            if(idx !== -1) { users[idx].status = users[idx].status === 'masked' ? 'active' : 'masked'; await DB.set('users', users); }
         }
 
-        function deleteUser(username) {
+        async function deleteUser(username) {
             if(!confirm("Supprimer ce compte ?")) return;
-            DB.set('users', DB.get('users', []).filter(u => u.username !== username)); render();
+            let users = (DB.get('users') || []).filter(u => u.username !== username);
+            await DB.set('users', users);
         }
 
         function renderAdminSurveillance() {
-            let msgs = DB.get('messages', []).filter(m => m.type === 'private');
+            let msgs = (DB.get('messages') || []).filter(m => m.type === 'private');
             return `<div class="dyn-card border p-6 rounded-3xl space-y-3"><h3 class="font-bold text-amber-300">Surveillance des Messages Privés</h3>
                 <div class="space-y-2 max-h-96 overflow-y-auto">${msgs.map(m => `<div class="p-3 bg-stone-900 border rounded-xl"><span class="font-bold text-amber-400">De ${m.sender} vers ${m.recipient}:</span> <p class="text-amber-100">${m.text}</p></div>`).join('')}</div></div>`;
         }
 
         function renderAdminQuizzes() {
-            let quizzes = DB.get('quizzes', []), subs = DB.get('quiz_submissions', {});
+            let quizzes = DB.get('quizzes') || [], subs = DB.get('quiz_submissions') || {};
             return `<div class="dyn-card border p-6 rounded-3xl space-y-4">
                 <h3 class="font-bold text-amber-300">Créer un Quiz (Multi-questions)</h3>
                 <form onsubmit="createQuiz(event)" class="space-y-3">
@@ -558,7 +583,7 @@
             c.appendChild(div);
         }
 
-        function createQuiz(e) {
+        async function createQuiz(e) {
             e.preventDefault();
             let title = document.getElementById('qz-title').value, questions = [];
             document.querySelectorAll('.q-block').forEach(b => {
@@ -567,12 +592,14 @@
                 let correct = parseInt(b.querySelector('.q-correct').value);
                 questions.push({ question, options, correct });
             });
-            let quizzes = DB.get('quizzes', []); quizzes.push({ id: Date.now(), title, questions });
-            DB.set('quizzes', quizzes); showToast("Succès", "Quiz publié !"); render();
+            let quizzes = DB.get('quizzes') || []; 
+            quizzes.push({ id: Date.now(), title, questions });
+            await DB.set('quizzes', quizzes);
+            showToast("Succès", "Quiz publié !");
         }
 
         function renderAdminAppreciations() {
-            let users = DB.get('users', []).filter(u => u.role === 'student'), allApp = DB.get('appreciations', {});
+            let users = (DB.get('users') || []).filter(u => u.role === 'student'), allApp = DB.get('appreciations') || {};
             return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Saisie des Appréciations</h3>
                 <table class="w-full text-left"><thead><tr class="border-b text-amber-400"><th class="p-2">Élève</th><th class="p-2">T1</th><th class="p-2">T2</th><th class="p-2">T3</th><th class="p-2">Publier</th><th class="p-2">Action</th></tr></thead>
                 <tbody>${users.map(u => {
@@ -586,19 +613,20 @@
                 }).join('')}</tbody></table></div>`;
         }
 
-        function saveApp(username) {
-            let all = DB.get('appreciations', {});
+        async function saveApp(username) {
+            let all = DB.get('appreciations') || {};
             all[username] = {
                 t1: document.getElementById(`t1_${username}`).value,
                 t2: document.getElementById(`t2_${username}`).value,
                 t3: document.getElementById(`t3_${username}`).value,
                 published: document.getElementById(`pub_${username}`).checked
             };
-            DB.set('appreciations', all); showToast("Succès", "Appréciations enregistrées !");
+            await DB.set('appreciations', all);
+            showToast("Succès", "Appréciations enregistrées !");
         }
 
         function renderAdminDocs() {
-            let revisions = DB.get('revision_sheets', []), exams = DB.get('exam_subjects', []);
+            let revisions = DB.get('revision_sheets') || [], exams = DB.get('exam_subjects') || [];
             return `<div class="dyn-card border p-6 rounded-3xl space-y-6">
                 <h3 class="font-bold text-amber-300 text-sm">Gestion des Fiches de Révision et Sujets</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -632,33 +660,32 @@
             if (!file) return;
 
             let reader = new FileReader();
-            reader.onload = (ev) => {
-                let list = DB.get(type, []);
+            reader.onload = async (ev) => {
+                let list = DB.get(type) || [];
                 list.push({ title, fileData: ev.target.result, fileType: file.type });
-                DB.set(type, list);
-                showToast("Succès", "Document importé et synchronisé !");
-                render();
+                await DB.set(type, list);
+                showToast("Succès", "Document importé sur le cloud !");
             };
             reader.readAsDataURL(file);
         }
 
-        function deleteDoc(type, idx) {
-            let list = DB.get(type, []);
+        async function deleteDoc(type, idx) {
+            let list = DB.get(type) || [];
             list.splice(idx, 1);
-            DB.set(type, list);
-            render();
+            await DB.set(type, list);
         }
 
         function renderAdminPages() {
-            let hidden = DB.get('hidden_pages', []);
+            let hidden = DB.get('hidden_pages') || [];
             let pages = [{ id: 'home', label: 'Accueil' }, { id: 'appreciations', label: 'Appréciations' }, { id: 'chat', label: 'Messagerie' }, { id: 'calendar', label: 'Agenda' }, { id: 'quizzes', label: 'Quiz' }, { id: 'revisions', label: 'Fiches de Révision' }, { id: 'exams', label: 'Sujets & Exercices' }];
             return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Masquer / Afficher les Pages</h3>
                 <div class="grid grid-cols-2 gap-2">${pages.map(p => `<label class="p-3 bg-stone-900 rounded-xl flex justify-between items-center"><span>${p.label}</span><input type="checkbox" ${hidden.includes(p.id)?'checked':''} onchange="togglePage('${p.id}')"></label>`).join('')}</div></div>`;
         }
-        function togglePage(id) {
-            let h = DB.get('hidden_pages', []);
+        async function togglePage(id) {
+            let h = DB.get('hidden_pages') || [];
             h.includes(id) ? h = h.filter(x=>x!==id) : h.push(id);
-            DB.set('hidden_pages', h); showToast("Succès", "Visibilité mise à jour !");
+            await DB.set('hidden_pages', h);
+            showToast("Succès", "Visibilité mise à jour !");
         }
 
         function renderAdminTheme() {
@@ -667,29 +694,57 @@
         }
         function uploadQR(e) {
             let r = new FileReader();
-            r.onload = (ev) => { DB.set('home_qr_image', ev.target.result); showToast("Succès", "QR Code mis à jour !"); render(); };
+            r.onload = async (ev) => { 
+                await DB.set('home_qr_image', ev.target.result); 
+                showToast("Succès", "QR Code mis à jour sur le cloud !"); 
+            };
             r.readAsDataURL(e.target.files[0]);
         }
 
-        function handleLogin(e) {
+        async function handleLogin(e) {
             e.preventDefault();
-            let u = document.getElementById('l-user').value, p = document.getElementById('l-pass').value;
-            let user = DB.get('users', []).find(x => x.username === u && x.password === p);
-            if (user) { localStorage.setItem('leqg_current_user', JSON.stringify(user)); render(); } else alert("Identifiants incorrects");
+            let u = document.getElementById('l-user').value.trim();
+            let p = document.getElementById('l-pass').value.trim();
+
+            // Rechargement direct depuis Firebase au moment de la connexion
+            if (db) {
+                try {
+                    let doc = await db.collection("leqg_data").doc("users").get();
+                    if (doc.exists) { cloudData.users = doc.data().value; }
+                } catch(err){}
+            }
+
+            let users = DB.get('users') || [];
+            let user = users.find(x => x.username === u && x.password === p);
+            if (user) { 
+                sessionStorage.setItem('leqg_current_user', JSON.stringify(user)); 
+                render(); 
+            } else { 
+                alert("Identifiant ou mot de passe incorrect"); 
+            }
         }
-        function saveSetup(e) {
+
+        async function saveSetup(e) {
             e.preventDefault();
-            let user = getCurrentUser(), users = DB.get('users', []), idx = users.findIndex(u => u.username === user.username);
+            let user = getCurrentUser();
+            let users = DB.get('users') || [];
+            let idx = users.findIndex(u => u.username === user.username);
             if(idx !== -1) {
                 users[idx].lastName = document.getElementById('s-lastname').value;
                 users[idx].email = document.getElementById('s-email').value;
                 users[idx].password = document.getElementById('s-pass').value;
                 users[idx].birthday = document.getElementById('s-bday').value;
                 users[idx].mustChangePass = false;
-                DB.set('users', users); localStorage.setItem('leqg_current_user', JSON.stringify(users[idx])); render();
+                await DB.set('users', users);
+                sessionStorage.setItem('leqg_current_user', JSON.stringify(users[idx]));
+                render();
             }
         }
-        function logout() { localStorage.removeItem('leqg_current_user'); render(); }
+
+        function logout() { 
+            sessionStorage.removeItem('leqg_current_user'); 
+            render(); 
+        }
 
         window.onload = init;
     </script>
