@@ -42,6 +42,7 @@
             <div class="flex justify-between items-center border-b border-amber-900/40 pb-3">
                 <h3 id="viewer-title" class="font-black text-lg text-amber-400">Aperçu du Document</h3>
                 <div class="flex gap-2 items-center">
+                    <a id="viewer-open-tab" href="#" target="_blank" class="px-3 py-1.5 bg-stone-900 text-amber-200 border rounded-xl text-xs font-bold flex items-center gap-1.5"><i class="fa-solid fa-external-link-alt"></i> Ouvrir</a>
                     <a id="viewer-download-btn" href="#" download class="px-3 py-1.5 dyn-btn text-white rounded-xl text-xs font-bold flex items-center gap-1.5"><i class="fa-solid fa-download"></i> Télécharger</a>
                     <button onclick="toggleModal('file-viewer-modal', false)" class="text-amber-200/70 hover:text-white p-2"><i class="fa-solid fa-xmark text-xl"></i></button>
                 </div>
@@ -86,7 +87,9 @@
             },
             set(k, val) {
                 localStorage.setItem('leqg_' + k, JSON.stringify(val));
-                if (db) { db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); }
+                if (db) { 
+                    db.collection("leqg_data").doc(k).set({ value: val }).catch((err) => { console.warn("Erreur sauvegarde Firebase :", err); }); 
+                }
             },
             async syncFromRemote() {
                 if (!db) return;
@@ -94,7 +97,9 @@
                 for (let k of keys) {
                     try {
                         let doc = await db.collection("leqg_data").doc(k).get();
-                        if (doc.exists) { localStorage.setItem('leqg_' + k, JSON.stringify(doc.data().value)); }
+                        if (doc.exists) { 
+                            localStorage.setItem('leqg_' + k, JSON.stringify(doc.data().value)); 
+                        }
                     } catch(e){}
                 }
             }
@@ -132,43 +137,22 @@
             if (!DB.get('exam_subjects', null)) DB.set('exam_subjects', []);
             if (!DB.get('countdowns', null)) DB.set('countdowns', [{ id: 1, title: 'Épreuves du Bac Pro', date: '2026-06-15T08:00' }]);
 
-            applyTheme();
-            checkBirthdays();
             render();
 
-            DB.syncFromRemote().then(() => { applyTheme(); render(); });
+            DB.syncFromRemote().then(() => { render(); });
 
+            // Synchronisation périodique vers Firebase toutes les 30 secondes
             setInterval(() => {
                 const keys = ['users', 'messages', 'ideas_board', 'countdowns', 'quizzes', 'quiz_submissions', 'custom_pages', 'hidden_pages', 'admin_calendar', 'appreciations', 'revision_sheets', 'exam_subjects', 'site_colors', 'home_qr_image'];
                 if (db) {
                     for (let k of keys) {
                         let val = DB.get(k, null);
-                        if (val !== null) { db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); }
+                        if (val !== null) { 
+                            db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); 
+                        }
                     }
                 }
-            }, 60000);
-        }
-
-        function applyTheme() {
-            let colors = DB.get('site_colors', { btnColor: '#d97706', cardBg: 'rgba(10, 10, 10, 0.9)', borderColor: 'rgba(245, 158, 11, 0.4)' });
-            document.documentElement.style.setProperty('--custom-btn-bg', colors.btnColor);
-            document.documentElement.style.setProperty('--custom-card-bg', colors.cardBg);
-            document.documentElement.style.setProperty('--custom-border-color', colors.borderColor);
-        }
-
-        function checkBirthdays() {
-            let u = getCurrentUser();
-            if (!u || u.role !== 'admin') return;
-            let users = DB.get('users', []), today = new Date().toISOString().split('T')[0].slice(5);
-            if (localStorage.getItem('leqg_bday_checked') !== today) {
-                users.forEach(user => {
-                    if (user.birthday && user.birthday.slice(5) === today) {
-                        let age = new Date().getFullYear() - parseInt(user.birthday.split('-')[0]);
-                        showToast("Joyeux Anniversaire ! 🎂", `C'est l'anniversaire de ${user.username} (${age} ans) aujourd'hui !`);
-                    }
-                });
-                localStorage.setItem('leqg_bday_checked', today);
-            }
+            }, 30000);
         }
 
         function getCurrentUser() { return JSON.parse(localStorage.getItem('leqg_current_user') || 'null'); }
@@ -183,6 +167,7 @@
         function openFileViewer(title, url, type) {
             document.getElementById('viewer-title').textContent = title;
             document.getElementById('viewer-download-btn').href = url;
+            document.getElementById('viewer-open-tab').href = url;
             let c = document.getElementById('viewer-content-container');
             c.innerHTML = type.includes('pdf') ? `<embed src="${url}" type="application/pdf" width="100%" height="100%" />` : `<img src="${url}" class="max-h-full object-contain rounded-xl" />`;
             toggleModal('file-viewer-modal', true);
@@ -223,7 +208,6 @@
         function renderDashboard(user) {
             let hidden = DB.get('hidden_pages', []), custom = DB.get('custom_pages', []);
             let navs = custom.filter(p => !hidden.includes('page_' + p.id)).map(p => sbBtn('page_' + p.id, p.title, p.icon || 'file-lines')).join('');
-
             let canAccessAdmin = user.role === 'admin' || user.role === 'delegate';
 
             return `
@@ -340,7 +324,19 @@
         function renderDocPage(title, items) {
             return `<div class="max-w-3xl mx-auto space-y-4 text-xs">
                 <div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">${title}</h2></div>
-                <div class="space-y-2">${items.map(d => `<div class="dyn-card border p-4 rounded-2xl flex justify-between items-center"><h4 class="font-bold text-amber-100">${d.title}</h4><button onclick="openFileViewer('${d.title}', '${d.fileData}', '${d.fileType}')" class="px-3 py-1.5 bg-sky-600 text-white rounded-xl font-bold">Ouvrir</button></div>`).join('')}</div></div>`;
+                <div class="space-y-2">
+                    ${items.map(d => `
+                        <div class="dyn-card border p-4 rounded-2xl flex justify-between items-center flex-wrap gap-2">
+                            <h4 class="font-bold text-amber-100">${d.title}</h4>
+                            <div class="flex gap-2">
+                                <button onclick="openFileViewer('${d.title}', '${d.fileData}', '${d.fileType}')" class="px-3 py-1.5 bg-sky-600 text-white rounded-xl font-bold"><i class="fa-solid fa-eye mr-1"></i> Aperçu</button>
+                                <a href="${d.fileData}" target="_blank" class="px-3 py-1.5 bg-stone-900 border text-amber-200 rounded-xl font-bold"><i class="fa-solid fa-external-link-alt mr-1"></i> Ouvrir</a>
+                                <a href="${d.fileData}" download="${d.title}" class="px-3 py-1.5 dyn-btn text-white rounded-xl font-bold"><i class="fa-solid fa-download mr-1"></i> Télécharger</a>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
         }
 
         function renderIdeasPage() {
@@ -391,6 +387,7 @@
                     ${isMainAdmin ? `<button onclick="state.adminSub='surveillance';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='surveillance'?'dyn-btn text-white':'bg-stone-900'}">Surveillance Chat</button>` : ''}
                     ${isMainAdmin || perms.quizzes ? `<button onclick="state.adminSub='quizzes';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='quizzes'?'dyn-btn text-white':'bg-stone-900'}">Quiz & Résultats</button>` : ''}
                     ${isMainAdmin || perms.appreciations ? `<button onclick="state.adminSub='appreciations';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='appreciations'?'dyn-btn text-white':'bg-stone-900'}">Appréciations</button>` : ''}
+                    ${isMainAdmin || perms.revisions ? `<button onclick="state.adminSub='docs';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='docs'?'dyn-btn text-white':'bg-stone-900'}">Fiches & Examens</button>` : ''}
                     ${isMainAdmin || perms.pages ? `<button onclick="state.adminSub='pages';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='pages'?'dyn-btn text-white':'bg-stone-900'}">Pages & Visibilité</button>` : ''}
                     ${isMainAdmin || perms.theme ? `<button onclick="state.adminSub='theme';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='theme'?'dyn-btn text-white':'bg-stone-900'}">Thème & QR Code</button>` : ''}
                 </div>
@@ -398,6 +395,7 @@
                 ${state.adminSub === 'surveillance' && isMainAdmin ? renderAdminSurveillance() : ''}
                 ${state.adminSub === 'quizzes' && (isMainAdmin || perms.quizzes) ? renderAdminQuizzes() : ''}
                 ${state.adminSub === 'appreciations' && (isMainAdmin || perms.appreciations) ? renderAdminAppreciations() : ''}
+                ${state.adminSub === 'docs' && (isMainAdmin || perms.revisions) ? renderAdminDocs() : ''}
                 ${state.adminSub === 'pages' && (isMainAdmin || perms.pages) ? renderAdminPages() : ''}
                 ${state.adminSub === 'theme' && (isMainAdmin || perms.theme) ? renderAdminTheme() : ''}
             </div>`;
@@ -411,12 +409,8 @@
             return `<div class="dyn-card border p-6 rounded-3xl space-y-6">
                 <div class="flex justify-between items-center flex-wrap gap-2">
                     <h3 class="font-bold text-amber-300 text-sm">Gestion des Comptes & Rôles</h3>
-                    <div class="flex gap-2">
-                        <button onclick="exportAllCSV()" class="px-3 py-1.5 bg-emerald-600 text-white font-bold rounded-xl">Export Tous CSV</button>
-                    </div>
+                    <button onclick="exportAllCSV()" class="px-3 py-1.5 bg-emerald-600 text-white font-bold rounded-xl">Export Tous CSV</button>
                 </div>
-
-                <!-- Formulaire de création de compte -->
                 <form onsubmit="createNewUser(event)" class="p-4 bg-stone-900 rounded-2xl border space-y-3">
                     <h4 class="font-bold text-amber-400">Créer un nouveau compte</h4>
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
@@ -429,8 +423,6 @@
                     </div>
                     <button type="submit" class="w-full py-2 dyn-btn text-white font-bold rounded-xl">Créer le compte</button>
                 </form>
-
-                <!-- Délégués Adjoints -->
                 <div class="space-y-3">
                     <h4 class="font-bold text-amber-400">Délégués Adjoints (3 max)</h4>
                     ${delegates.map(d => `
@@ -444,10 +436,11 @@
                             </div>
                             <div class="border-t pt-2 space-y-1">
                                 <span class="text-[10px] text-amber-200/70 font-bold">Permissions d'accès :</span>
-                                <div class="grid grid-cols-2 md:grid-cols-5 gap-2 pt-1">
+                                <div class="grid grid-cols-2 md:grid-cols-6 gap-2 pt-1">
                                     <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.users?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'users')"> Comptes</label>
                                     <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.quizzes?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'quizzes')"> Quiz</label>
                                     <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.appreciations?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'appreciations')"> Appréciations</label>
+                                    <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.revisions?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'revisions')"> Fiches</label>
                                     <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.pages?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'pages')"> Pages</label>
                                     <label class="flex items-center gap-1.5"><input type="checkbox" ${d.permissions?.theme?'checked':''} onchange="toggleDelegatePerm('${d.username}', 'theme')"> Thème</label>
                                 </div>
@@ -455,8 +448,6 @@
                         </div>
                     `).join('')}
                 </div>
-
-                <!-- Élèves -->
                 <div class="space-y-2 pt-2">
                     <h4 class="font-bold text-amber-400">Élèves Inscrits (${students.length})</h4>
                     ${students.map(s => `
@@ -480,26 +471,16 @@
             let password = document.getElementById('new-pass').value.trim();
             let role = document.getElementById('new-role').value;
             let users = DB.get('users', []);
-            if (users.some(u => u.username === username)) {
-                alert("Cet identifiant existe déjà !");
-                return;
-            }
+            if (users.some(u => u.username === username)) { alert("Cet identifiant existe déjà !"); return; }
             users.push({ username, lastName: '', password, role, status: 'active', mustChangePass: true, birthday: '2009-01-01', email: '', permissions: {} });
-            DB.set('users', users);
-            showToast("Succès", "Compte créé avec succès !");
-            render();
+            DB.set('users', users); showToast("Succès", "Compte créé !"); render();
         }
 
         function resetPassword(username) {
             let newPass = prompt("Nouveau mot de passe pour " + username + " :");
             if (!newPass) return;
             let users = DB.get('users', []), idx = users.findIndex(u => u.username === username);
-            if (idx !== -1) {
-                users[idx].password = newPass;
-                DB.set('users', users);
-                showToast("Succès", "Mot de passe mis à jour !");
-                render();
-            }
+            if (idx !== -1) { users[idx].password = newPass; DB.set('users', users); showToast("Succès", "Mot de passe mis à jour !"); render(); }
         }
 
         function toggleDelegatePerm(username, permKey) {
@@ -507,8 +488,7 @@
             if (idx !== -1) {
                 if (!users[idx].permissions) users[idx].permissions = {};
                 users[idx].permissions[permKey] = !users[idx].permissions[permKey];
-                DB.set('users', users);
-                showToast("Permissions", "Modifications enregistrées !");
+                DB.set('users', users); showToast("Permissions", "Modifications enregistrées !");
             }
         }
 
@@ -615,6 +595,58 @@
                 published: document.getElementById(`pub_${username}`).checked
             };
             DB.set('appreciations', all); showToast("Succès", "Appréciations enregistrées !");
+        }
+
+        function renderAdminDocs() {
+            let revisions = DB.get('revision_sheets', []), exams = DB.get('exam_subjects', []);
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-6">
+                <h3 class="font-bold text-amber-300 text-sm">Gestion des Fiches de Révision et Sujets</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <form onsubmit="uploadDoc(event, 'revision_sheets')" class="p-4 bg-stone-900 rounded-2xl border space-y-2">
+                        <h4 class="font-bold text-amber-400">Ajouter une Fiche de Révision</h4>
+                        <input type="text" id="rev-title" required placeholder="Titre..." class="w-full p-2 bg-stone-950 border rounded-xl text-amber-100">
+                        <input type="file" id="rev-file" required accept=".pdf,image/*" class="w-full p-2 bg-stone-950 border rounded-xl text-amber-100 text-xs">
+                        <button type="submit" class="w-full py-2 dyn-btn text-white font-bold rounded-xl">Importer Fiche</button>
+                    </form>
+                    <form onsubmit="uploadDoc(event, 'exam_subjects')" class="p-4 bg-stone-900 rounded-2xl border space-y-2">
+                        <h4 class="font-bold text-amber-400">Ajouter un Sujet / Exercice</h4>
+                        <input type="text" id="ex-title" required placeholder="Titre..." class="w-full p-2 bg-stone-950 border rounded-xl text-amber-100">
+                        <input type="file" id="ex-file" required accept=".pdf,image/*" class="w-full p-2 bg-stone-950 border rounded-xl text-amber-100 text-xs">
+                        <button type="submit" class="w-full py-2 dyn-btn text-white font-bold rounded-xl">Importer Sujet</button>
+                    </form>
+                </div>
+                <div class="space-y-2 pt-2">
+                    <h4 class="font-bold text-amber-400">Documents actuels</h4>
+                    ${revisions.map((d, i) => `<div class="p-2 bg-stone-900 rounded flex justify-between"><span>[Fiche] ${d.title}</span><button onclick="deleteDoc('revision_sheets', ${i})" class="text-red-400">Supprimer</button></div>`).join('')}
+                    ${exams.map((d, i) => `<div class="p-2 bg-stone-900 rounded flex justify-between"><span>[Sujet] ${d.title}</span><button onclick="deleteDoc('exam_subjects', ${i})" class="text-red-400">Supprimer</button></div>`).join('')}
+                </div>
+            </div>`;
+        }
+
+        function uploadDoc(e, type) {
+            e.preventDefault();
+            let titleId = type === 'revision_sheets' ? 'rev-title' : 'ex-title';
+            let fileId = type === 'revision_sheets' ? 'rev-file' : 'ex-file';
+            let title = document.getElementById(titleId).value;
+            let file = document.getElementById(fileId).files[0];
+            if (!file) return;
+
+            let reader = new FileReader();
+            reader.onload = (ev) => {
+                let list = DB.get(type, []);
+                list.push({ title, fileData: ev.target.result, fileType: file.type });
+                DB.set(type, list);
+                showToast("Succès", "Document importé et synchronisé !");
+                render();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function deleteDoc(type, idx) {
+            let list = DB.get(type, []);
+            list.splice(idx, 1);
+            DB.set(type, list);
+            render();
         }
 
         function renderAdminPages() {
