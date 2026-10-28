@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="fr" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LE QG - Espace Collaboratif Lycée</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- SDK Firebase v10 -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+    <style>
+        :root {
+            --custom-btn-bg: #d97706;
+            --custom-card-bg: rgba(10, 10, 10, 0.9);
+            --custom-border-color: rgba(245, 158, 11, 0.4);
+        }
+        .dyn-btn { background-color: var(--custom-btn-bg) !important; }
+        .dyn-btn:hover { filter: brightness(1.15); }
+        .dyn-card { background-color: var(--custom-card-bg) !important; border-color: var(--custom-border-color) !important; }
+    </style>
+</head>
+<body id="body-theme" class="bg-stone-950 text-amber-50 h-full flex flex-col font-sans bg-cover bg-center bg-fixed relative overflow-hidden">
+
+    <div id="video-bg-container" class="hidden fixed inset-0 z-0 pointer-events-none"></div>
+    <audio id="bg-audio" loop class="hidden"></audio>
+
+    <div id="app" class="h-full flex flex-col flex-1 backdrop-blur-sm bg-black/60 z-10 relative overflow-hidden">
+        <div class="flex-1 flex items-center justify-center p-4 text-center">
+            <div class="space-y-3">
+                <div class="w-10 h-10 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <p class="text-amber-200 text-sm font-medium">Chargement de LE QG...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Visionneuse de fichiers -->
+    <div id="file-viewer-modal" class="hidden fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4">
+        <div class="w-full max-w-5xl h-[85vh] dyn-card border rounded-3xl p-6 shadow-2xl flex flex-col space-y-4">
+            <div class="flex justify-between items-center border-b border-amber-900/40 pb-3">
+                <h3 id="viewer-title" class="font-black text-lg text-amber-400">Aperçu du Document</h3>
+                <div class="flex gap-2 items-center">
+                    <a id="viewer-download-btn" href="#" download class="px-3 py-1.5 dyn-btn text-white rounded-xl text-xs font-bold flex items-center gap-1.5"><i class="fa-solid fa-download"></i> Télécharger</a>
+                    <button onclick="toggleModal('file-viewer-modal', false)" class="text-amber-200/70 hover:text-white p-2"><i class="fa-solid fa-xmark text-xl"></i></button>
+                </div>
+            </div>
+            <div id="viewer-content-container" class="flex-1 bg-stone-900 rounded-2xl overflow-hidden border border-amber-900/40 flex items-center justify-center"></div>
+        </div>
+    </div>
+
+    <!-- Toast Global -->
+    <div id="global-notification-toast" class="hidden fixed bottom-6 right-6 z-50 max-w-sm dyn-card border-2 border-amber-500 p-4 rounded-2xl shadow-2xl flex items-start gap-3">
+        <div class="text-amber-400 text-2xl"><i class="fa-solid fa-bell"></i></div>
+        <div class="flex-1 space-y-1">
+            <h4 class="font-bold text-xs text-amber-300" id="toast-title">LE QG</h4>
+            <p class="text-xs text-amber-100" id="toast-msg"></p>
+        </div>
+        <button onclick="toggleModal('global-notification-toast', false)" class="text-amber-200/50"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyDQp8qnPJ64u0dBMaSnOZN31BV30QaHz3k",
+            authDomain: "lqgp-9d3e0.firebaseapp.com",
+            projectId: "lqgp-9d3e0",
+            storageBucket: "lqgp-9d3e0.firebasestorage.app",
+            messagingSenderId: "542617927378",
+            appId: "1:542617927378:web:90aeb0b57805dabf27b70b"
+        };
+        
+        let db = null;
+        try {
+            firebase.initializeApp(firebaseConfig);
+            db = firebase.firestore();
+        } catch(e) {}
+
+        const ADMIN_EMAIL = "charlescusson27@gmail.com";
+
+        const DB = {
+            get(k, fb) {
+                let item = localStorage.getItem('leqg_' + k);
+                if (item) { try { return JSON.parse(item); } catch(e){} }
+                return fb;
+            },
+            set(k, val) {
+                localStorage.setItem('leqg_' + k, JSON.stringify(val));
+                if (db) { db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); }
+            },
+            async syncFromRemote() {
+                if (!db) return;
+                const keys = ['users', 'messages', 'ideas_board', 'countdowns', 'quizzes', 'quiz_submissions', 'custom_pages', 'hidden_pages', 'admin_calendar', 'appreciations', 'revision_sheets', 'exam_subjects', 'site_colors', 'home_qr_image'];
+                for (let k of keys) {
+                    try {
+                        let doc = await db.collection("leqg_data").doc(k).get();
+                        if (doc.exists) { localStorage.setItem('leqg_' + k, JSON.stringify(doc.data().value)); }
+                    } catch(e){}
+                }
+            }
+        };
+
+        let state = {
+            tab: 'home',
+            sidebar: false,
+            chatMode: 'general',
+            targetUser: null,
+            adminSub: 'users',
+            activeQuizId: null
+        };
+
+        let countdownInterval = null;
+
+        function init() {
+            if (!DB.get('users', null)) {
+                DB.set('users', [
+                    { username: 'admin', lastName: 'Délégué Principal', password: 'admin20', role: 'admin', status: 'active', mustChangePass: true, birthday: '2009-03-26', email: ADMIN_EMAIL, permissions: {} },
+                    { username: 'delegue1', lastName: 'Adjoint 1', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { users: true, quizzes: true } },
+                    { username: 'delegue2', lastName: 'Adjoint 2', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { ideas: true, calendar: true } },
+                    { username: 'delegue3', lastName: 'Adjoint 3', password: 'pass123', role: 'delegate', status: 'active', mustChangePass: false, birthday: '2009-01-01', email: '', permissions: { pages: true, revisions: true } }
+                ]);
+            }
+            if (!DB.get('messages', null)) DB.set('messages', [{ id: 1, type: 'general', sender: 'admin', text: 'Bienvenue sur LE QG !', time: 'Aujourd\'hui' }]);
+            if (!DB.get('appreciations', null)) DB.set('appreciations', {});
+            if (!DB.get('custom_pages', null)) DB.set('custom_pages', []);
+            if (!DB.get('hidden_pages', null)) DB.set('hidden_pages', []);
+            if (!DB.get('admin_calendar', null)) DB.set('admin_calendar', []);
+            if (!DB.get('quizzes', null)) DB.set('quizzes', []);
+            if (!DB.get('quiz_submissions', null)) DB.set('quiz_submissions', {});
+            if (!DB.get('ideas_board', null)) DB.set('ideas_board', []);
+            if (!DB.get('revision_sheets', null)) DB.set('revision_sheets', []);
+            if (!DB.get('exam_subjects', null)) DB.set('exam_subjects', []);
+            if (!DB.get('countdowns', null)) DB.set('countdowns', [{ id: 1, title: 'Épreuves du Bac Pro', date: '2026-06-15T08:00' }]);
+
+            applyTheme();
+            checkBirthdays();
+            render();
+
+            DB.syncFromRemote().then(() => { applyTheme(); render(); });
+
+            setInterval(() => {
+                const keys = ['users', 'messages', 'ideas_board', 'countdowns', 'quizzes', 'quiz_submissions', 'custom_pages', 'hidden_pages', 'admin_calendar', 'appreciations', 'revision_sheets', 'exam_subjects', 'site_colors', 'home_qr_image'];
+                if (db) {
+                    for (let k of keys) {
+                        let val = DB.get(k, null);
+                        if (val !== null) { db.collection("leqg_data").doc(k).set({ value: val }).catch(() => {}); }
+                    }
+                }
+            }, 60000);
+
+            setInterval(checkAlarms, 30000);
+        }
+
+        function applyTheme() {
+            let colors = DB.get('site_colors', { btnColor: '#d97706', cardBg: 'rgba(10, 10, 10, 0.9)', borderColor: 'rgba(245, 158, 11, 0.4)' });
+            document.documentElement.style.setProperty('--custom-btn-bg', colors.btnColor);
+            document.documentElement.style.setProperty('--custom-card-bg', colors.cardBg);
+            document.documentElement.style.setProperty('--custom-border-color', colors.borderColor);
+        }
+
+        function checkBirthdays() {
+            let u = getCurrentUser();
+            if (!u || u.role !== 'admin') return;
+            let users = DB.get('users', []), today = new Date().toISOString().split('T')[0].slice(5);
+            if (localStorage.getItem('leqg_bday_checked') !== today) {
+                users.forEach(user => {
+                    if (user.birthday && user.birthday.slice(5) === today) {
+                        let age = new Date().getFullYear() - parseInt(user.birthday.split('-')[0]);
+                        showToast("Joyeux Anniversaire ! 🎂", `C'est l'anniversaire de ${user.username} (${age} ans) aujourd'hui !`);
+                    }
+                });
+                localStorage.setItem('leqg_bday_checked', today);
+            }
+        }
+
+        function checkAlarms() {
+            let u = getCurrentUser();
+            if (!u) return;
+            let now = new Date(), todayStr = now.toISOString().split('T')[0];
+            if (now.getHours() === 9 && now.getMinutes() === 0 && localStorage.getItem('leqg_cantine') !== todayStr) {
+                showToast("Rappel Cantine 🍽️", "Pense à réserver ta cantine !");
+                localStorage.setItem('leqg_cantine', todayStr);
+            }
+        }
+
+        // Le rôle et les permissions sont relus depuis les comptes enregistrés,
+        // plutôt que de faire confiance à l'objet modifiable leqg_current_user.
+        // Important : cela améliore les contrôles côté client, mais ne remplace pas
+        // des règles d'autorisation côté serveur/Firebase.
+        function getCurrentUser() {
+            try {
+                const session = JSON.parse(localStorage.getItem('leqg_current_user') || 'null');
+                if (!session || !session.username) return null;
+                return DB.get('users', []).find(u => u.username === session.username) || null;
+            } catch (e) { return null; }
+        }
+        function hasPermission(permission, user = getCurrentUser()) {
+            if (!user) return false;
+            if (user.role === 'admin') return true;
+            return user.role === 'delegate' && user.permissions?.[permission] === true;
+        }
+        function requirePermission(permission, message = 'Tu n’as pas l’autorisation d’effectuer cette action.') {
+            if (!hasPermission(permission)) { alert(message); return false; }
+            return true;
+        }
+        function requireAdmin(message = 'Action réservée à l’administrateur principal.') {
+            const user = getCurrentUser();
+            if (!user || user.role !== 'admin') { alert(message); return false; }
+            return true;
+        }
+        function showToast(title, msg) {
+            document.getElementById('toast-title').textContent = title;
+            document.getElementById('toast-msg').textContent = msg;
+            document.getElementById('global-notification-toast').classList.remove('hidden');
+            setTimeout(() => document.getElementById('global-notification-toast').classList.add('hidden'), 5000);
+        }
+        function toggleModal(id, show) { document.getElementById(id).classList.toggle('hidden', !show); }
+
+        function openFileViewer(title, url, type) {
+            document.getElementById('viewer-title').textContent = title;
+            document.getElementById('viewer-download-btn').href = url;
+            let c = document.getElementById('viewer-content-container');
+            c.innerHTML = type.includes('pdf') ? `<embed src="${url}" type="application/pdf" width="100%" height="100%" />` : `<img src="${url}" class="max-h-full object-contain rounded-xl" />`;
+            toggleModal('file-viewer-modal', true);
+        }
+
+        function render() {
+            if (countdownInterval) clearInterval(countdownInterval);
+            let app = document.getElementById('app'), user = getCurrentUser();
+            if (!user) return app.innerHTML = renderLogin();
+            if (user.status === 'masked') return app.innerHTML = `<div class="flex-1 flex flex-col items-center justify-center p-6 text-center"><h1 class="text-xl font-bold text-red-400">Compte Suspendu</h1><button onclick="logout()" class="mt-4 px-4 py-2 dyn-btn text-white rounded-xl text-xs">Déconnexion</button></div>`;
+            if (user.mustChangePass) return app.innerHTML = renderSetup();
+            app.innerHTML = renderDashboard(user);
+            if (state.tab === 'home') startCountdownsTimer();
+        }
+
+        function renderLogin() {
+            return `<div class="flex-1 flex items-center justify-center p-4"><div class="w-full max-w-md dyn-card border rounded-3xl p-8 shadow-2xl space-y-6 text-center">
+                <div class="p-3 bg-amber-500/10 text-amber-400 rounded-2xl text-3xl inline-block"><i class="fa-solid fa-chess-rook"></i></div>
+                <h1 class="text-2xl font-black text-white">LE QG</h1>
+                <form onsubmit="handleLogin(event)" class="space-y-3 text-left">
+                    <input type="text" id="l-user" required placeholder="Identifiant (admin)" class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
+                    <input type="password" id="l-pass" required placeholder="Mot de passe (admin20)" class="w-full px-4 py-3 bg-stone-900 border rounded-2xl text-xs text-amber-100">
+                    <button type="submit" class="w-full py-3 dyn-btn text-xs text-white font-bold rounded-2xl">Se connecter</button>
+                </form></div></div>`;
+        }
+
+        function renderSetup() {
+            return `<div class="flex-1 flex items-center justify-center p-4"><div class="w-full max-w-md dyn-card border rounded-3xl p-8 shadow-2xl space-y-4">
+                <h1 class="text-lg font-bold text-amber-400">Première Connexion</h1>
+                <form onsubmit="saveSetup(event)" class="space-y-3 text-xs">
+                    <input type="text" id="s-lastname" required placeholder="Nom de famille" class="w-full p-3 bg-stone-900 border rounded-xl text-white">
+                    <input type="email" id="s-email" placeholder="E-mail (ex: charlescusson27@gmail.com)" class="w-full p-3 bg-stone-900 border rounded-xl text-white">
+                    <input type="password" id="s-pass" required placeholder="Nouveau mot de passe" class="w-full p-3 bg-stone-900 border rounded-xl text-white">
+                    <input type="date" id="s-bday" required class="w-full p-3 bg-stone-900 border rounded-xl text-white">
+                    <button type="submit" class="w-full py-3 dyn-btn text-white font-bold rounded-xl">Valider</button>
+                </form></div></div>`;
+        }
+
+        function renderDashboard(user) {
+            let hidden = DB.get('hidden_pages', []), custom = DB.get('custom_pages', []);
+            let navs = custom.filter(p => !hidden.includes('page_' + p.id)).map(p => sbBtn('page_' + p.id, p.title, p.icon || 'file-lines')).join('');
+
+            return `
+                <header class="bg-stone-950/80 border-b border-amber-900/40 px-4 py-3 flex justify-between items-center backdrop-blur-md">
+                    <div class="flex items-center gap-3">
+                        <button onclick="state.sidebar=!state.sidebar;render()" class="p-2 bg-stone-900 text-amber-100 rounded-xl"><i class="fa-solid fa-bars"></i></button>
+                        <span class="font-black text-amber-400 text-sm">LE QG (${user.username})</span>
+                    </div>
+                    <button onclick="logout()" class="px-3 py-1.5 bg-stone-900 text-amber-200 text-xs rounded-xl border">Déconnexion</button>
+                </header>
+                <div class="flex-1 flex overflow-hidden relative">
+                    <aside class="fixed inset-y-0 left-0 z-30 w-64 bg-stone-950/95 border-r border-amber-900/40 transform ${state.sidebar ? 'translate-x-0' : '-translate-x-full'} transition-transform flex flex-col p-4 pt-16 space-y-1 text-xs overflow-y-auto">
+                        ${!hidden.includes('home') ? sbBtn('home', 'Accueil & QR Code', 'house') : ''}
+                        ${!hidden.includes('appreciations') ? sbBtn('appreciations', 'Mes Appréciations', 'award') : ''}
+                        ${!hidden.includes('chat') ? sbBtn('chat', 'Messagerie', 'comments') : ''}
+                        ${!hidden.includes('calendar') ? sbBtn('calendar', 'Agenda', 'calendar-days') : ''}
+                        ${!hidden.includes('quizzes') ? sbBtn('quizzes', 'Quiz & Résultats', 'brain') : ''}
+                        ${!hidden.includes('revisions') ? sbBtn('revisions', 'Fiches de Révision', 'book-open') : ''}
+                        ${!hidden.includes('exams') ? sbBtn('exams', 'Sujets & Exercices', 'graduation-cap') : ''}
+                        ${!hidden.includes('ideas') ? sbBtn('ideas', 'Boîte à Idées', 'lightbulb') : ''}
+                        ${!hidden.includes('notes') ? sbBtn('notes', 'Bloc-Notes', 'note-sticky') : ''}
+                        ${navs}
+                        ${user.role === 'admin' || user.role === 'delegate' ? sbBtn('admin', 'Espace Délégué', 'user-gear', 'text-amber-400 bg-amber-500/10') : ''}
+                    </aside>
+                    <main class="flex-1 overflow-y-auto p-4 md:p-6">${renderContent(user)}</main>
+                </div>`;
+        }
+
+        function sbBtn(id, label, icon, extra = '') {
+            let active = state.tab === id;
+            return `<button onclick="state.tab='${id}';state.sidebar=false;render()" class="w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-3 border transition-all ${active ? 'dyn-btn text-white font-bold' : 'text-amber-200/80 bg-stone-900/50 border-transparent hover:bg-stone-900'} ${extra}"><i class="fa-solid fa-${icon} w-4"></i> ${label}</button>`;
+        }
+
+        function renderContent(user) {
+            if (state.tab.startsWith('page_')) {
+                let cp = DB.get('custom_pages', []).find(x => x.id == state.tab.replace('page_', ''));
+                return cp ? `<div class="max-w-3xl mx-auto dyn-card border p-6 rounded-3xl space-y-4"><h2 class="text-2xl font-black text-amber-400">${cp.title}</h2>${cp.elements.map(e => e.type === 'text' ? `<p class="text-xs text-amber-100 whitespace-pre-wrap">${e.content}</p>` : `<button onclick="openFileViewer('${e.title}', '${e.fileData}', '${e.fileType}')" class="px-4 py-2 dyn-btn text-white rounded-xl text-xs font-bold">${e.title}</button>`).join('')}</div>` : '';
+            }
+            if (state.tab === 'home') return renderHome();
+            if (state.tab === 'appreciations') return renderUserAppreciations(user);
+            if (state.tab === 'chat') return renderChat(user);
+            if (state.tab === 'calendar') return renderCalendar(user);
+            if (state.tab === 'quizzes') return renderQuizzesTab(user);
+            if (state.tab === 'revisions') return renderDocPage('Fiches de Révision', DB.get('revision_sheets', []));
+            if (state.tab === 'exams') return renderDocPage('Sujets Bac & Exercices', DB.get('exam_subjects', []));
+            if (state.tab === 'ideas') return renderIdeasPage(user);
+            if (state.tab === 'notes') return renderNotesPage(user);
+            if (state.tab === 'admin' && (user.role === 'admin' || user.role === 'delegate')) return renderAdmin(user);
+            return '';
+        }
+
+        // --- ACCUEIL & QR CODE ---
+        function renderHome() {
+            let qr = DB.get('home_qr_image', ''), countdowns = DB.get('countdowns', []);
+            let user = getCurrentUser();
+            let countdownHtml = countdowns.length ? countdowns.map(c => `<div class="countdown-item p-4 bg-stone-900 rounded-2xl border border-amber-900/30" data-countdown-id="${c.id}"><div class="font-bold text-amber-200">${escapeHTML(c.title || 'Échéance')}</div><div class="text-xs text-amber-200/60 mt-1">${new Date(c.date).toLocaleString('fr-FR', {dateStyle:'long', timeStyle:'short'})}</div><div class="countdown-value text-2xl font-black text-amber-400 mt-2" data-date="${c.date}">Calcul en cours…</div>${user && user.role === 'admin' ? `<button onclick="deleteCountdown(${Number(c.id)})" class="mt-2 px-3 py-1 bg-red-900/40 text-red-200 rounded-lg">Supprimer</button>` : ''}</div>`).join('') : `<p class="text-xs text-amber-200/60">Aucun compte à rebours configuré.</p>`;
+            return `<div class="max-w-3xl mx-auto space-y-6 text-center">
+                <div class="dyn-card border p-8 space-y-3 rounded-3xl"><h2 class="text-2xl font-black text-white">Bienvenue sur LE QG</h2><p class="text-xs text-amber-200/75">Ton espace collaboratif de lycée.</p></div>
+                <div class="dyn-card border p-6 rounded-3xl space-y-3"><h3 class="font-bold text-amber-400 text-sm"><i class="fa-solid fa-hourglass-half mr-2"></i>Comptes à rebours</h3><div id="countdowns-list" class="grid gap-3 text-left">${countdownHtml}</div></div>
+                <div class="dyn-card border p-6 rounded-3xl space-y-3">
+                    <h3 class="font-bold text-amber-400 text-sm"><i class="fa-solid fa-qrcode mr-2"></i>QR Code d'accès mobile</h3>
+                    ${qr ? `<div class="bg-white p-3 inline-block rounded-2xl"><img src="${qr}" width="150" height="150"/></div>` : `<p class="text-xs text-amber-200/50">Aucun QR code configuré.</p>`}
+                </div>
+            </div>`;
+        }
+        function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+        function startCountdownsTimer() {
+            updateCountdowns();
+            countdownInterval = setInterval(updateCountdowns, 1000);
+        }
+        function updateCountdowns() {
+            document.querySelectorAll('.countdown-value[data-date]').forEach(el => {
+                const target = new Date(el.dataset.date).getTime(), diff = target - Date.now();
+                if (!Number.isFinite(target)) { el.textContent = 'Date invalide'; return; }
+                if (diff <= 0) { el.textContent = 'Échéance atteinte'; return; }
+                const days = Math.floor(diff / 86400000), hours = Math.floor(diff % 86400000 / 3600000), mins = Math.floor(diff % 3600000 / 60000), secs = Math.floor(diff % 60000 / 1000);
+                el.textContent = `${days} j ${hours} h ${mins} min ${secs} s`;
+            });
+        }
+        function addCountdown(e) {
+            e.preventDefault();
+            if (!requireAdmin('Seul l’administrateur principal peut gérer les comptes à rebours.')) return;
+            const title = document.getElementById('cd-title').value.trim(), date = document.getElementById('cd-date').value;
+            if (!title || !date || !Number.isFinite(new Date(date).getTime())) return alert('Indique un titre et une date valides.');
+            const list = DB.get('countdowns', []); list.push({id: Date.now(), title, date}); DB.set('countdowns', list); showToast('Succès', 'Compte à rebours ajouté.'); render();
+        }
+        function deleteCountdown(id) {
+            if (getCurrentUser()?.role !== 'admin') return alert('Seul l’administrateur peut supprimer un compte à rebours.');
+            DB.set('countdowns', DB.get('countdowns', []).filter(c => Number(c.id) !== Number(id))); render();
+        }
+        function renderCountdownAdmin() {
+            const list = DB.get('countdowns', []);
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Gestion des comptes à rebours</h3><form onsubmit="addCountdown(event)" class="grid gap-3"><input id="cd-title" required maxlength="100" placeholder="Nom de l’échéance" class="p-3 bg-stone-900 border rounded-xl text-amber-100"><input id="cd-date" type="datetime-local" required class="p-3 bg-stone-900 border rounded-xl text-amber-100"><button class="dyn-btn text-white font-bold rounded-xl p-3">Ajouter le compte à rebours</button></form><div class="space-y-2">${list.map(c => `<div class="p-3 bg-stone-900 rounded-xl flex justify-between gap-3"><span>${escapeHTML(c.title)} — ${new Date(c.date).toLocaleString('fr-FR')}</span><button onclick="deleteCountdown(${Number(c.id)})" class="text-red-300">Supprimer</button></div>`).join('') || '<p>Aucun compte à rebours.</p>'}</div></div>`;
+        }
+        function renderCalendar(user) {
+            const events = DB.get('admin_calendar', []).slice().sort((a,b) => new Date(a.date) - new Date(b.date));
+            const canManage = user.role === 'admin' || !!(user.permissions && user.permissions.calendar);
+            return `<div class="max-w-3xl mx-auto space-y-4 text-xs"><div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400"><i class="fa-solid fa-calendar-days mr-2"></i>Agenda</h2><p class="text-amber-200/70 mt-2">Retrouve les dates importantes et les événements de la classe.</p></div>${canManage ? `<div class="dyn-card border p-6 rounded-3xl space-y-3"><h3 class="font-bold text-amber-300">Ajouter un événement</h3><form onsubmit="addCalendarEvent(event)" class="space-y-3"><input id="cal-title" required maxlength="120" placeholder="Titre de l’événement" class="w-full p-3 bg-stone-900 border rounded-xl text-amber-100"><textarea id="cal-desc" maxlength="1000" placeholder="Description (facultatif)" class="w-full p-3 bg-stone-900 border rounded-xl text-amber-100"></textarea><input id="cal-date" type="datetime-local" required class="w-full p-3 bg-stone-900 border rounded-xl text-amber-100"><button class="dyn-btn text-white font-bold rounded-xl px-4 py-2">Enregistrer l’événement</button></form></div>` : ''}<div class="dyn-card border p-6 rounded-3xl space-y-3"><h3 class="font-bold text-amber-300">Événements à venir</h3>${events.length ? events.map(ev => `<article class="p-4 bg-stone-900 rounded-xl border border-amber-900/20"><div class="font-bold text-amber-200">${escapeHTML(ev.title)}</div><div class="text-amber-400 mt-1">${new Date(ev.date).toLocaleString('fr-FR', {dateStyle:'medium',timeStyle:'short'})}</div>${ev.description ? `<p class="text-amber-100/80 whitespace-pre-wrap mt-2">${escapeHTML(ev.description)}</p>` : ''}<div class="text-amber-200/40 mt-2">Ajouté par ${escapeHTML(ev.author || 'un délégué')}</div>${canManage ? `<button onclick="deleteCalendarEvent(${Number(ev.id)})" class="mt-2 px-3 py-1 bg-red-900/40 text-red-200 rounded-lg">Supprimer</button>` : ''}</article>`).join('') : '<p class="text-amber-200/60">Aucun événement pour le moment.</p>'}</div></div>`;
+        }
+        function addCalendarEvent(e) {
+            e.preventDefault(); const user = getCurrentUser();
+            if (!user || !(user.role === 'admin' || (user.permissions && user.permissions.calendar))) return alert('Tu n’as pas la permission de gérer l’agenda.');
+            const title = document.getElementById('cal-title').value.trim(), date = document.getElementById('cal-date').value, description = document.getElementById('cal-desc').value.trim();
+            if (!title || !date || !Number.isFinite(new Date(date).getTime())) return alert('Indique un titre et une date valides.');
+            const events = DB.get('admin_calendar', []); events.push({id: Date.now(), title, date, description, author:user.username}); DB.set('admin_calendar', events); showToast('Succès', 'Événement ajouté à l’agenda.'); render();
+        }
+        function deleteCalendarEvent(id) {
+            const user = getCurrentUser(); if (!user || !(user.role === 'admin' || (user.permissions && user.permissions.calendar))) return alert('Tu n’as pas la permission de supprimer cet événement.');
+            DB.set('admin_calendar', DB.get('admin_calendar', []).filter(ev => Number(ev.id) !== Number(id))); render();
+        }
+
+        // --- APPRÉCIATIONS ---
+        function renderUserAppreciations(user) {
+            let all = DB.get('appreciations', {}), myApp = all[user.username] || { t1: '', t2: '', t3: '', published: false };
+            if (!myApp.published) return `<div class="max-w-2xl mx-auto dyn-card border p-8 text-center rounded-3xl"><i class="fa-solid fa-lock text-4xl text-amber-400"></i><h2 class="text-xl font-bold text-white">Appréciations</h2><p class="text-xs text-amber-200/70 mt-2">Non publiées par le délégué pour le moment.</p></div>`;
+            return `<div class="max-w-3xl mx-auto space-y-4 text-xs">
+                <div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">Mes Appréciations</h2></div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div class="dyn-card border p-4 rounded-2xl"><h4 class="font-bold text-amber-300">Trimestre 1</h4><p class="mt-2 text-amber-100">${myApp.t1 || 'Aucune'}</p></div>
+                    <div class="dyn-card border p-4 rounded-2xl"><h4 class="font-bold text-amber-300">Trimestre 2</h4><p class="mt-2 text-amber-100">${myApp.t2 || 'Aucune'}</p></div>
+                    <div class="dyn-card border p-4 rounded-2xl"><h4 class="font-bold text-amber-300">Trimestre 3</h4><p class="mt-2 text-amber-100">${myApp.t3 || 'Aucune'}</p></div>
+                </div></div>`;
+        }
+
+        // --- QUIZ & RÉSULTATS ---
+        function renderQuizzesTab(user) {
+            let quizzes = DB.get('quizzes', []), subs = DB.get('quiz_submissions', {}), mySubs = subs[user.username] || [];
+            if (state.activeQuizId) {
+                let q = quizzes.find(x => x.id === state.activeQuizId);
+                return q ? renderActiveQuiz(q) : '';
+            }
+            return `<div class="max-w-3xl mx-auto space-y-4 text-xs">
+                <div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">Quiz Disponibles</h2></div>
+                <div class="space-y-2">${quizzes.map(q => `<div class="dyn-card border p-4 rounded-2xl flex justify-between items-center"><div><h4 class="font-bold text-amber-200">${q.title}</h4><p class="text-[10px] text-amber-200/50">${q.questions.length} question(s)</p></div><button onclick="state.activeQuizId=${q.id};render()" class="px-3 py-1.5 dyn-btn text-white rounded-xl font-bold">Lancer</button></div>`).join('')}</div>
+                <div class="dyn-card border p-6 rounded-3xl space-y-2 mt-6">
+                    <h3 class="font-bold text-amber-300">Historique de mes résultats</h3>
+                    ${mySubs.map(s => `<div class="p-2 bg-stone-900 rounded-xl flex justify-between"><span>${s.quizTitle} (${s.date})</span><span class="font-bold text-amber-400">${s.score} / ${s.total}</span></div>`).join('')}
+                </div></div>`;
+        }
+
+        function renderActiveQuiz(quiz) {
+            return `<div class="max-w-2xl mx-auto dyn-card border p-6 rounded-3xl space-y-4 text-xs">
+                <div class="flex justify-between items-center border-b pb-2"><h2 class="text-lg font-black text-amber-400">${quiz.title}</h2><button onclick="state.activeQuizId=null;render()" class="text-amber-200">Quitter</button></div>
+                <form onsubmit="submitQuiz(event, ${quiz.id})" class="space-y-4">
+                    ${quiz.questions.map((q, qIdx) => `<div class="p-3 bg-stone-900 border rounded-xl space-y-2"><p class="font-bold text-amber-100">Q${qIdx+1}: ${q.question}</p><div class="space-y-1">${q.options.map((opt, oIdx) => `<label class="block p-2 bg-stone-950 border rounded-lg cursor-pointer flex items-center gap-2"><input type="radio" name="q_${qIdx}" value="${oIdx}" required><span>${opt}</span></label>`).join('')}</div></div>`).join('')}
+                    <button type="submit" class="w-full py-2.5 dyn-btn text-white font-bold rounded-xl">Valider mes réponses</button>
+                </form></div>`;
+        }
+
+        function submitQuiz(e, quizId) {
+            e.preventDefault();
+            let quiz = DB.get('quizzes', []).find(x => x.id === quizId), score = 0;
+            quiz.questions.forEach((q, idx) => {
+                let sel = document.querySelector(`input[name="q_${idx}"]:checked`);
+                if (sel && parseInt(sel.value) === parseInt(q.correct)) score++;
+            });
+            let user = getCurrentUser(), subs = DB.get('quiz_submissions', {});
+            if (!subs[user.username]) subs[user.username] = [];
+            subs[user.username].push({ quizId, quizTitle: quiz.title, score, total: quiz.questions.length, date: new Date().toLocaleDateString() });
+            DB.set('quiz_submissions', subs);
+            showToast("Quiz validé !", `Tu as obtenu ${score} / ${quiz.questions.length}`);
+            state.activeQuizId = null; render();
+        }
+
+        // --- DOCUMENTS (Révisions / Exams) ---
+        function renderDocPage(title, items) {
+            return `<div class="max-w-3xl mx-auto space-y-4 text-xs">
+                <div class="dyn-card border p-6 rounded-3xl"><h2 class="text-xl font-black text-amber-400">${title}</h2></div>
+                <div class="space-y-2">${items.map(d => `<div class="dyn-card border p-4 rounded-2xl flex justify-between items-center"><h4 class="font-bold text-amber-100">${d.title}</h4><button onclick="openFileViewer('${d.title}', '${d.fileData}', '${d.fileType}')" class="px-3 py-1.5 bg-sky-600 text-white rounded-xl font-bold">Ouvrir</button></div>`).join('')}</div></div>`;
+        }
+
+        // --- BOÎTE À IDÉES & NOTES ---
+        function renderIdeasPage() {
+            let ideas = DB.get('ideas_board', []);
+            return `<div class="max-w-2xl mx-auto space-y-4 text-xs">
+                <div class="dyn-card border p-6 rounded-3xl space-y-3"><h2 class="text-xl font-black text-amber-400">Boîte à Idées</h2>
+                <form onsubmit="submitIdea(event)" class="space-y-2"><input type="text" id="i-title" required placeholder="Titre..." class="w-full p-2.5 bg-stone-900 border rounded-xl"><textarea id="i-desc" required placeholder="Description..." class="w-full p-2.5 bg-stone-900 border rounded-xl h-16 resize-none"></textarea><button type="submit" class="w-full py-2 dyn-btn text-white rounded-xl font-bold">Proposer</button></form></div>
+                <div class="space-y-2">${ideas.map((i, idx)=>`<div class="dyn-card border p-4 rounded-2xl space-y-2"><h4 class="font-bold text-amber-200">${i.title} (${i.author})</h4><p class="text-amber-100">${i.desc}</p><div class="flex gap-2"><button onclick="voteIdea(${idx}, 'up')" class="px-2 py-1 bg-emerald-600/20 text-emerald-300 rounded-lg">Pour (${i.votesUp||0})</button><button onclick="voteIdea(${idx}, 'down')" class="px-2 py-1 bg-red-600/20 text-red-300 rounded-lg">Contre (${i.votesDown||0})</button></div></div>`).join('')}</div></div>`;
+        }
+        function submitIdea(e) {
+            e.preventDefault();
+            let ideas = DB.get('ideas_board', []);
+            ideas.push({ title: document.getElementById('i-title').value, desc: document.getElementById('i-desc').value, author: getCurrentUser().username, votesUp: 0, votesDown: 0 });
+            DB.set('ideas_board', ideas); render();
+        }
+        function voteIdea(idx, type) {
+            let ideas = DB.get('ideas_board', []);
+            ideas[idx][type === 'up' ? 'votesUp' : 'votesDown']++;
+            DB.set('ideas_board', ideas); render();
+        }
+
+        function renderNotesPage(user) {
+            return `<div class="max-w-2xl mx-auto dyn-card border p-6 h-[450px] flex flex-col rounded-3xl space-y-2 text-xs"><h2 class="text-xl font-bold text-amber-400">Bloc-Notes</h2><textarea oninput="localStorage.setItem('leqg_note_${user.username}', this.value)" class="flex-1 w-full bg-stone-900 border p-3 rounded-xl text-amber-100 resize-none">${localStorage.getItem('leqg_note_'+user.username)||''}</textarea></div>`;
+        }
+
+        // --- MESSAGERIE CHAT ---
+        function renderChat(user) {
+            let users = DB.get('users', []), msgs = DB.get('messages', []);
+            let active = state.chatMode === 'general' ? msgs.filter(m => m.type === 'general') : msgs.filter(m => m.type === 'private' && (m.sender === user.username && m.recipient === state.targetUser || m.sender === state.targetUser && m.recipient === user.username));
+            return `<div class="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-4 h-[500px] text-xs">
+                <div class="dyn-card border p-3 flex flex-col space-y-2 rounded-3xl"><button onclick="state.chatMode='general';render()" class="p-2 rounded-xl bg-stone-900 font-bold text-amber-200">Général</button><div class="flex-1 overflow-y-auto space-y-1">${users.filter(u=>u.username!==user.username).map(u=>`<button onclick="state.chatMode='private';state.targetUser='${u.username}';render()" class="w-full text-left p-2 rounded-xl bg-stone-900 text-amber-200">${u.username}</button>`).join('')}</div></div>
+                <div class="md:col-span-3 dyn-card border p-4 flex flex-col justify-between rounded-3xl"><div class="flex-1 overflow-y-auto space-y-2 bg-stone-900/40 p-3 rounded-2xl">${active.map(m=>`<div class="p-2.5 bg-stone-950 rounded-xl space-y-1"><span class="font-bold text-amber-400">${m.sender}:</span> <p class="text-amber-100">${m.text}</p></div>`).join('')}</div>
+                <form onsubmit="sendChat(event)" class="flex gap-2 pt-2"><input type="text" id="c-inp" required placeholder="Message..." class="flex-1 p-2.5 bg-stone-900 border rounded-xl text-amber-100"><button type="submit" class="dyn-btn px-4 text-white rounded-xl font-bold">Envoyer</button></form></div></div>`;
+        }
+        function sendChat(e) {
+            e.preventDefault();
+            let msgs = DB.get('messages', []);
+            msgs.push({ type: state.chatMode, sender: getCurrentUser().username, recipient: state.targetUser, text: document.getElementById('c-inp').value, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) });
+            DB.set('messages', msgs); render();
+        }
+
+        // --- ESPACE DÉLÉGUÉ ---
+        function renderAdmin(user) {
+            user = getCurrentUser();
+            if (!user || !['admin', 'delegate'].includes(user.role)) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            let isMainAdmin = user.role === 'admin';
+            let perms = user.permissions || {};
+
+            return `<div class="max-w-4xl mx-auto space-y-4 text-xs">
+                <div class="dyn-card border p-4 rounded-3xl flex gap-2 flex-wrap">
+                    ${isMainAdmin || perms.users ? `<button onclick="state.adminSub='users';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='users'?'dyn-btn text-white':'bg-stone-900'}">Comptes & Rôles</button>` : ''}
+                    ${isMainAdmin ? `<button onclick="state.adminSub='surveillance';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='surveillance'?'dyn-btn text-white':'bg-stone-900'}">Surveillance Chat</button>` : ''}
+                    ${isMainAdmin ? `<button onclick="state.adminSub='countdowns';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='countdowns'?'dyn-btn text-white':'bg-stone-900'}">Comptes à rebours</button>` : ''}
+                    ${isMainAdmin || perms.quizzes ? `<button onclick="state.adminSub='quizzes';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='quizzes'?'dyn-btn text-white':'bg-stone-900'}">Quiz & Résultats</button>` : ''}
+                    ${isMainAdmin || perms.appreciations ? `<button onclick="state.adminSub='appreciations';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='appreciations'?'dyn-btn text-white':'bg-stone-900'}">Appréciations</button>` : ''}
+                    ${isMainAdmin || perms.pages ? `<button onclick="state.adminSub='pages';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='pages'?'dyn-btn text-white':'bg-stone-900'}">Pages & Visibilité</button>` : ''}
+                    ${isMainAdmin || perms.theme ? `<button onclick="state.adminSub='theme';render()" class="px-3 py-1.5 rounded-xl font-bold ${state.adminSub==='theme'?'dyn-btn text-white':'bg-stone-900'}">Thème & QR Code</button>` : ''}
+                </div>
+                ${state.adminSub === 'users' && (isMainAdmin || perms.users) ? renderAdminUsers() : ''}
+                ${state.adminSub === 'surveillance' && isMainAdmin ? renderAdminSurveillance() : ''}
+                ${state.adminSub === 'countdowns' && isMainAdmin ? renderCountdownAdmin() : ''}
+                ${state.adminSub === 'quizzes' && (isMainAdmin || perms.quizzes) ? renderAdminQuizzes() : ''}
+                ${state.adminSub === 'appreciations' && (isMainAdmin || perms.appreciations) ? renderAdminAppreciations() : ''}
+                ${state.adminSub === 'pages' && (isMainAdmin || perms.pages) ? renderAdminPages() : ''}
+                ${state.adminSub === 'theme' && (isMainAdmin || perms.theme) ? renderAdminTheme() : ''}
+            </div>`;
+        }
+
+        // 1. Gestion des comptes & Export CSV
+        function renderAdminUsers() {
+            if (!hasPermission('users')) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            let users = DB.get('users', []);
+            let students = users.filter(u => u.role === 'student');
+            let delegates = users.filter(u => u.role === 'delegate');
+
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4">
+                <div class="flex justify-between items-center"><h3 class="font-bold text-amber-300">Gestion des Comptes</h3><div class="flex gap-2"><button onclick="exportAllCSV()" class="px-3 py-1.5 bg-emerald-600 text-white font-bold rounded-xl">Export Tous CSV</button></div></div>
+                <div class="space-y-3">
+                    <h4 class="font-bold text-amber-400">Délégués Adjoints (3 max)</h4>
+                    ${delegates.map(d => `<div class="p-3 bg-stone-900 rounded-xl flex justify-between items-center"><span><b>${d.username}</b> (${d.lastName})</span><button onclick="openDelegatePerms('${d.username}')" class="px-3 py-1 dyn-btn text-white rounded-lg">Gérer permissions</button></div>`).join('')}
+                </div>
+                <div class="space-y-2 pt-4 border-t">
+                    <h4 class="font-bold text-amber-400">Élèves Inscrits (${students.length})</h4>
+                    ${students.map(s => `<div class="p-3 bg-stone-900 rounded-xl flex justify-between items-center"><span><b>${s.username}</b> (${s.lastName||''})</span><div class="flex gap-2"><button onclick="exportSingleCSV('${s.username}')" class="px-2.5 py-1 bg-stone-950 text-amber-200 border rounded-lg">CSV</button><button onclick="toggleMask('${s.username}')" class="px-2.5 py-1 bg-stone-950 rounded-lg">${s.status==='masked'?'Démasquer':'Masquer'}</button><button onclick="deleteUser('${s.username}')" class="px-2.5 py-1 bg-red-600/30 text-red-300 rounded-lg">Supprimer</button></div></div>`).join('')}
+                </div></div>`;
+        }
+
+        function openDelegatePerms(username) {
+            const current = getCurrentUser();
+            if (!current || current.role !== 'admin') return alert('Seul l’administrateur principal peut modifier les permissions.');
+            const delegate = DB.get('users', []).find(u => u.username === username && u.role === 'delegate');
+            if (!delegate) return alert('Délégué introuvable.');
+            state.permissionsTarget = username;
+            const permissions = delegate.permissions || {};
+            const options = [{id:'users',label:'Comptes & rôles'},{id:'quizzes',label:'Quiz & résultats'},{id:'appreciations',label:'Appréciations'},{id:'pages',label:'Pages & visibilité'},{id:'theme',label:'Thème & QR Code'},{id:'calendar',label:'Créer et gérer l’agenda'}];
+            document.getElementById('delegate-permissions-modal')?.remove();
+            const modal = document.createElement('div'); modal.id = 'delegate-permissions-modal'; modal.className = 'fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4';
+            modal.innerHTML = `<div class="dyn-card border p-6 rounded-3xl w-full max-w-md space-y-4"><div class="flex justify-between items-center"><h3 class="text-lg font-black text-amber-300">Permissions de ${escapeHTML(delegate.username)}</h3><button type="button" onclick="document.getElementById('delegate-permissions-modal').remove()" class="text-amber-200 text-xl">×</button></div><p class="text-xs text-amber-200/70">Coche uniquement les espaces que ce délégué est autorisé à gérer.</p><div class="space-y-2">${options.map(o => `<label class="flex items-center justify-between p-3 bg-stone-900 rounded-xl"><span>${o.label}</span><input type="checkbox" class="delegate-perm accent-amber-500" value="${o.id}" ${permissions[o.id] ? 'checked' : ''}></label>`).join('')}</div><button type="button" onclick="saveDelegatePerms()" class="w-full dyn-btn text-white font-bold rounded-xl p-3">Enregistrer les permissions</button></div>`;
+            document.body.appendChild(modal);
+        }
+        function saveDelegatePerms() {
+            const current = getCurrentUser(); if (!current || current.role !== 'admin') return alert('Action réservée à l’administrateur principal.');
+            const username = state.permissionsTarget; const users = DB.get('users', []); const delegate = users.find(u => u.username === username && u.role === 'delegate');
+            if (!delegate) return alert('Délégué introuvable.');
+            const permissions = {}; document.querySelectorAll('#delegate-permissions-modal .delegate-perm:checked').forEach(el => permissions[el.value] = true);
+            delegate.permissions = permissions; DB.set('users', users);
+            const logged = getCurrentUser(); if (logged && logged.username === username) localStorage.setItem('leqg_current_user', JSON.stringify(delegate));
+            document.getElementById('delegate-permissions-modal')?.remove(); showToast('Succès', 'Permissions du délégué mises à jour.'); render();
+        }
+
+        function exportAllCSV() {
+            if (!requirePermission('users')) return;
+            let csv = "Identifiant;Nom;Email;Role\n";
+            DB.get('users', []).forEach(u => csv += `${u.username};${u.lastName||''};${u.email||''};${u.role}\n`);
+            downloadCSV("tous_les_comptes.csv", csv);
+        }
+        function exportSingleCSV(username) {
+            if (!requirePermission('users')) return;
+            let u = DB.get('users', []).find(x => x.username === username);
+            if(u) downloadCSV(`compte_${username}.csv`, `Identifiant;Nom;Email;Role\n${u.username};${u.lastName||''};${u.email||''};${u.role}\n`);
+        }
+        function downloadCSV(filename, text) {
+            let a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(text);
+            a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        }
+        function toggleMask(username) {
+            if (!requirePermission('users')) return;
+            let users = DB.get('users', []), idx = users.findIndex(u => u.username === username && u.role === 'student');
+            if(idx !== -1) { users[idx].status = users[idx].status === 'masked' ? 'active' : 'masked'; DB.set('users', users); render(); }
+            else alert('Seuls les comptes élèves peuvent être modifiés ici.');
+        }
+        function deleteUser(username) {
+            if (!requirePermission('users')) return;
+            const target = DB.get('users', []).find(u => u.username === username);
+            if (!target || target.role !== 'student') return alert('Seuls les comptes élèves peuvent être supprimés ici.');
+            if(!confirm("Supprimer ce compte élève ?")) return;
+            DB.set('users', DB.get('users', []).filter(u => u.username !== username)); render();
+        }
+
+        // 2. Surveillance Chat
+        function renderAdminSurveillance() {
+            if (!requireAdmin()) return '';
+            let msgs = DB.get('messages', []).filter(m => m.type === 'private');
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-3"><h3 class="font-bold text-amber-300">Surveillance des Messages Privés</h3>
+                <div class="space-y-2 max-h-96 overflow-y-auto">${msgs.map(m => `<div class="p-3 bg-stone-900 border rounded-xl"><span class="font-bold text-amber-400">De ${m.sender} vers ${m.recipient}:</span> <p class="text-amber-100">${m.text}</p></div>`).join('')}</div></div>`;
+        }
+
+        // 3. Quiz & Résultats Multiples Questions
+        function renderAdminQuizzes() {
+            if (!hasPermission('quizzes')) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            let quizzes = DB.get('quizzes', []), subs = DB.get('quiz_submissions', {});
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4">
+                <h3 class="font-bold text-amber-300">Créer un Quiz (Multi-questions)</h3>
+                <form onsubmit="createQuiz(event)" class="space-y-3">
+                    <input type="text" id="qz-title" required placeholder="Titre du quiz..." class="w-full p-2.5 bg-stone-900 border rounded-xl text-amber-100">
+                    <div id="qz-questions-container" class="space-y-3">
+                        <div class="p-3 bg-stone-900 border rounded-xl space-y-2 q-block">
+                            <input type="text" placeholder="Intitulé de la question..." class="q-text w-full p-2 bg-stone-950 border rounded-lg" required>
+                            <div class="grid grid-cols-2 gap-2">
+                                <input type="text" placeholder="Option A" class="q-opt-0 p-2 bg-stone-950 rounded" required>
+                                <input type="text" placeholder="Option B" class="q-opt-1 p-2 bg-stone-950 rounded" required>
+                                <input type="text" placeholder="Option C" class="q-opt-2 p-2 bg-stone-950 rounded">
+                                <input type="text" placeholder="Option D" class="q-opt-3 p-2 bg-stone-950 rounded">
+                            </div>
+                            <input type="number" min="0" max="3" value="0" placeholder="Index bonne réponse (0=A, 1=B...)" class="q-correct w-full p-2 bg-stone-950 rounded" required>
+                        </div>
+                    </div>
+                    <button type="button" onclick="addQuizQuestion()" class="px-3 py-1.5 bg-stone-900 border rounded-xl text-amber-200 font-bold">+ Ajouter une question</button>
+                    <button type="submit" class="w-full py-2.5 dyn-btn text-white font-bold rounded-xl">Publier le Quiz</button>
+                </form>
+                <div class="space-y-3 pt-4 border-t">
+                    <h4 class="font-bold text-amber-300">Rapport des résultats des élèves</h4>
+                    ${Object.keys(subs).map(user => `<div><b>${user}</b>: ${subs[user].map(r => `${r.quizTitle} (${r.score}/${r.total})`).join(', ')}</div>`).join('')}
+                </div></div>`;
+        }
+
+        function addQuizQuestion() {
+            let c = document.getElementById('qz-questions-container'), div = document.createElement('div');
+            div.className = "p-3 bg-stone-900 border rounded-xl space-y-2 q-block";
+            div.innerHTML = `<input type="text" placeholder="Intitulé de la question..." class="q-text w-full p-2 bg-stone-950 border rounded-lg" required><div class="grid grid-cols-2 gap-2"><input type="text" placeholder="Option A" class="q-opt-0 p-2 bg-stone-950 rounded" required><input type="text" placeholder="Option B" class="q-opt-1 p-2 bg-stone-950 rounded" required><input type="text" placeholder="Option C" class="q-opt-2 p-2 bg-stone-950 rounded"><input type="text" placeholder="Option D" class="q-opt-3 p-2 bg-stone-950 rounded"></div><input type="number" min="0" max="3" value="0" placeholder="Index bonne réponse" class="q-correct w-full p-2 bg-stone-950 rounded" required>`;
+            c.appendChild(div);
+        }
+
+        function createQuiz(e) {
+            e.preventDefault();
+            if (!requirePermission('quizzes')) return;
+            let title = document.getElementById('qz-title').value, questions = [];
+            document.querySelectorAll('.q-block').forEach(b => {
+                let question = b.querySelector('.q-text').value;
+                let options = [b.querySelector('.q-opt-0').value, b.querySelector('.q-opt-1').value, b.querySelector('.q-opt-2').value, b.querySelector('.q-opt-3').value].filter(x=>x);
+                let correct = parseInt(b.querySelector('.q-correct').value);
+                questions.push({ question, options, correct });
+            });
+            let quizzes = DB.get('quizzes', []); quizzes.push({ id: Date.now(), title, questions });
+            DB.set('quizzes', quizzes); showToast("Succès", "Quiz publié !"); render();
+        }
+
+        // 4. Appréciations en Tableau
+        function renderAdminAppreciations() {
+            if (!hasPermission('appreciations')) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            let users = DB.get('users', []).filter(u => u.role === 'student'), allApp = DB.get('appreciations', {});
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Saisie des Appréciations</h3>
+                <table class="w-full text-left"><thead><tr class="border-b text-amber-400"><th class="p-2">Élève</th><th class="p-2">T1</th><th class="p-2">T2</th><th class="p-2">T3</th><th class="p-2">Publier</th><th class="p-2">Action</th></tr></thead>
+                <tbody>${users.map(u => {
+                    let a = allApp[u.username] || { t1: '', t2: '', t3: '', published: false };
+                    return `<tr class="border-b"><td class="p-2 font-bold">${u.username}</td>
+                    <td class="p-2"><textarea id="t1_${u.username}" class="w-full p-1 bg-stone-900 rounded">${a.t1}</textarea></td>
+                    <td class="p-2"><textarea id="t2_${u.username}" class="w-full p-1 bg-stone-900 rounded">${a.t2}</textarea></td>
+                    <td class="p-2"><textarea id="t3_${u.username}" class="w-full p-1 bg-stone-900 rounded">${a.t3}</textarea></td>
+                    <td class="p-2 text-center"><input type="checkbox" id="pub_${u.username}" ${a.published?'checked':''}></td>
+                    <td class="p-2"><button onclick="saveApp('${u.username}')" class="px-2 py-1 dyn-btn text-white rounded font-bold">Enregistrer</button></td></tr>`;
+                }).join('')}</tbody></table></div>`;
+        }
+
+        function saveApp(username) {
+            if (!requirePermission('appreciations')) return;
+            if (!DB.get('users', []).some(u => u.username === username && u.role === 'student')) return alert('Élève introuvable.');
+            let all = DB.get('appreciations', {});
+            all[username] = {
+                t1: document.getElementById(`t1_${username}`).value,
+                t2: document.getElementById(`t2_${username}`).value,
+                t3: document.getElementById(`t3_${username}`).value,
+                published: document.getElementById(`pub_${username}`).checked
+            };
+            DB.set('appreciations', all); showToast("Succès", "Appréciations enregistrées !");
+        }
+
+        // 5. Pages & Masquage
+        function renderAdminPages() {
+            if (!hasPermission('pages')) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            let hidden = DB.get('hidden_pages', []);
+            let pages = [{ id: 'home', label: 'Accueil' }, { id: 'appreciations', label: 'Appréciations' }, { id: 'chat', label: 'Messagerie' }, { id: 'calendar', label: 'Agenda' }, { id: 'quizzes', label: 'Quiz' }, { id: 'revisions', label: 'Fiches de Révision' }, { id: 'exams', label: 'Sujets & Exercices' }];
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Masquer / Afficher les Pages</h3>
+                <div class="grid grid-cols-2 gap-2">${pages.map(p => `<label class="p-3 bg-stone-900 rounded-xl flex justify-between items-center"><span>${p.label}</span><input type="checkbox" ${hidden.includes(p.id)?'checked':''} onchange="togglePage('${p.id}')"></label>`).join('')}</div></div>`;
+        }
+        function togglePage(id) {
+            if (!requirePermission('pages')) return;
+            let h = DB.get('hidden_pages', []);
+            h.includes(id) ? h = h.filter(x=>x!==id) : h.push(id);
+            DB.set('hidden_pages', h); showToast("Succès", "Visibilité mise à jour !");
+        }
+
+        // 6. Thème & QR Code
+        function renderAdminTheme() {
+            if (!hasPermission('theme')) return '<div class="dyn-card border p-4 rounded-xl">Accès refusé.</div>';
+            return `<div class="dyn-card border p-6 rounded-3xl space-y-4"><h3 class="font-bold text-amber-300">Thème & QR Code</h3>
+                <div class="space-y-2"><label class="block">Importer le QR Code (Image)</label><input type="file" accept="image/*" onchange="uploadQR(event)" class="w-full p-2 bg-stone-900 rounded"></div></div>`;
+        }
+        function uploadQR(e) {
+            if (!requirePermission('theme')) { if (e?.target) e.target.value = ''; return; }
+            const file = e?.target?.files?.[0]; if (!file || !file.type.startsWith('image/')) return alert('Choisis un fichier image valide.');
+            let r = new FileReader();
+            r.onload = (ev) => { DB.set('home_qr_image', ev.target.result); showToast("Succès", "QR Code mis à jour !"); render(); };
+            r.readAsDataURL(e.target.files[0]);
+        }
+
+        function handleLogin(e) {
+            e.preventDefault();
+            let u = document.getElementById('l-user').value, p = document.getElementById('l-pass').value;
+            let user = DB.get('users', []).find(x => x.username === u && x.password === p);
+            if (user) { localStorage.setItem('leqg_current_user', JSON.stringify(user)); render(); } else alert("Identifiants incorrects");
+        }
+        function saveSetup(e) {
+            e.preventDefault();
+            let user = getCurrentUser(), users = DB.get('users', []), idx = users.findIndex(u => u.username === user.username);
+            if(idx !== -1) {
+                users[idx].lastName = document.getElementById('s-lastname').value;
+                users[idx].email = document.getElementById('s-email').value;
+                users[idx].password = document.getElementById('s-pass').value;
+                users[idx].birthday = document.getElementById('s-bday').value;
+                users[idx].mustChangePass = false;
+                DB.set('users', users); localStorage.setItem('leqg_current_user', JSON.stringify(users[idx])); render();
+            }
+        }
+        function logout() { localStorage.removeItem('leqg_current_user'); render(); }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
